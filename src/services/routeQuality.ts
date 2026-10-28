@@ -1,4 +1,5 @@
 import Constants from 'expo-constants';
+import { recordDiagnostic } from './diagnostics';
 
 export type Coordinate = {
   latitude: number;
@@ -37,8 +38,12 @@ type ValhallaResponse = {
 const ROUTING_ENDPOINT =
   Constants.expoConfig?.extra?.routingEndpoint ??
   'https://valhalla1.openstreetmap.de/route';
-const OPEN_METEO_ENDPOINT = 'https://air-quality-api.open-meteo.com/v1/air-quality';
-const OVERPASS_ENDPOINT = 'https://overpass-api.de/api/interpreter';
+const OPEN_METEO_ENDPOINT =
+  Constants.expoConfig?.extra?.airQualityEndpoint ??
+  'https://air-quality-api.open-meteo.com/v1/air-quality';
+const OVERPASS_ENDPOINT =
+  Constants.expoConfig?.extra?.osmQueryEndpoint ??
+  'https://overpass-api.de/api/interpreter';
 const FETCH_TIMEOUT_MS = 15_000;
 
 function assertCoordinate(point: Coordinate): void {
@@ -231,7 +236,10 @@ async function fetchStreetProxy(
   const query = `[out:json][timeout:12];(${aroundQueries}${parkQueries});out center tags;`;
   const response = await fetchWithTimeout(OVERPASS_ENDPOINT, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'User-Agent': 'RouteGuide/0.1.0 (mobile app)',
+    },
     body: `data=${encodeURIComponent(query)}`,
   });
   if (!response.ok) throw new Error(`OpenStreetMap Overpass returned HTTP ${response.status}`);
@@ -265,9 +273,11 @@ async function scoreRoute(candidate: RouteCandidate): Promise<RouteCandidate> {
   const streets = streetResult.status === 'fulfilled' ? streetResult.value : null;
   if (airResult.status === 'rejected') {
     console.warn('Route PM2.5 data unavailable:', airResult.reason);
+    await recordDiagnostic('warning', 'PM2.5 data provider request failed');
   }
   if (streetResult.status === 'rejected') {
     console.warn('Route road/park data unavailable:', streetResult.reason);
+    await recordDiagnostic('warning', 'OpenStreetMap road/park data provider request failed');
   }
   const hasAir = air?.pm25 !== null && air?.pm25 !== undefined;
   const hasRoad = streets?.majorRoadExposure !== null && streets?.majorRoadExposure !== undefined;

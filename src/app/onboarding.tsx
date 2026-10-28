@@ -1,14 +1,39 @@
-import { useState } from 'react';
-import { Alert, View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import { useEffect, useState } from 'react';
+import {
+  Alert,
+  TextInput,
+  View,
+  Text,
+  StyleSheet,
+  TouchableOpacity,
+} from 'react-native';
 import * as Location from 'expo-location';
 import { useRouter } from 'expo-router';
+import { SQLiteDB } from '@services/database';
+import { recordDiagnostic } from '@services/diagnostics';
 
 export default function Onboarding() {
   const router = useRouter();
   const [step, setStep] = useState(0);
   const [requesting, setRequesting] = useState(false);
+  const [profileName, setProfileName] = useState('');
+
+  useEffect(() => {
+    SQLiteDB.getLocalProfile()
+      .then(profile => {
+        if (profile) setProfileName(profile.displayName);
+      })
+      .catch(error => {
+        console.error('Could not load local profile:', error);
+        void recordDiagnostic('error', 'Could not load local profile');
+      });
+  }, []);
 
   const steps = [
+    {
+      title: 'Локальный профиль',
+      text: 'Создайте профиль на этом устройстве. Он не использует email, пароль, облачный аккаунт или синхронизацию.',
+    },
     {
       title: 'Маршруты с заботой о здоровье',
       text: 'Route Guide записывает ваши перемещения и предлагает более чистые и тихие альтернативные маршруты.',
@@ -19,15 +44,22 @@ export default function Onboarding() {
     },
     {
       title: 'Конфиденциальность',
-      text: 'Все данные хранятся локально на вашем устройстве. Вы можете удалить историю в любое время.',
+      text: 'Профиль, история и логи хранятся на устройстве в зашифрованной базе. Для отображения карты OpenFreeMap получает запросы видимых участков, а поиск маршрута передает координаты выбранным сервисам Valhalla, Open-Meteo и OpenStreetMap.',
     },
   ];
 
   const requestPermissions = async () => {
+    if (profileName.trim().length < 2) {
+      Alert.alert('Укажите имя', 'Имя профиля должно содержать не менее двух символов.');
+      return;
+    }
     setRequesting(true);
     try {
+      await SQLiteDB.saveLocalProfile(profileName);
+      await recordDiagnostic('info', 'Local profile created or updated');
       const foreground = await Location.requestForegroundPermissionsAsync();
       if (foreground.status !== 'granted') {
+        await recordDiagnostic('warning', 'Foreground location permission was denied');
         Alert.alert(
           'Геолокация не разрешена',
           'Без доступа к геолокации приложение не сможет записывать маршруты.'
@@ -37,6 +69,7 @@ export default function Onboarding() {
 
       const background = await Location.requestBackgroundPermissionsAsync();
       if (background.status !== 'granted') {
+        await recordDiagnostic('warning', 'Background location permission was denied');
         Alert.alert(
           'Фоновая запись недоступна',
           'Можно продолжить без фоновой записи. Чтобы записывать маршрут при заблокированном экране, включите фоновую геолокацию в настройках устройства.'
@@ -45,6 +78,7 @@ export default function Onboarding() {
       router.replace('/');
     } catch (error) {
       console.error('Could not request location permissions:', error);
+      await recordDiagnostic('error', 'Onboarding or location permission setup failed');
       Alert.alert('Ошибка', 'Не удалось запросить разрешения геолокации.');
     } finally {
       setRequesting(false);
@@ -57,6 +91,17 @@ export default function Onboarding() {
         <Text style={styles.step}>{step + 1} / {steps.length}</Text>
         <Text style={styles.title}>{steps[step].title}</Text>
         <Text style={styles.text}>{steps[step].text}</Text>
+        {step === 0 && (
+          <TextInput
+            accessibilityLabel="Имя локального профиля"
+            autoCapitalize="words"
+            maxLength={50}
+            onChangeText={setProfileName}
+            placeholder="Как к вам обращаться?"
+            style={styles.input}
+            value={profileName}
+          />
+        )}
       </View>
 
       <View style={styles.buttons}>
@@ -109,6 +154,16 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginBottom: 40,
     lineHeight: 24,
+  },
+  input: {
+    width: '100%',
+    minHeight: 50,
+    borderWidth: 1,
+    borderColor: '#CCD8D0',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    marginBottom: 24,
+    color: '#1A1A1A',
   },
   buttons: {
     width: '100%',

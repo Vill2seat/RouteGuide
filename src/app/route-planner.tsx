@@ -12,9 +12,7 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import * as Location from 'expo-location';
-import Constants from 'expo-constants';
-import { Platform } from 'react-native';
-import MapView, { Polyline } from 'react-native-maps';
+import RouteMap from '@components/RouteMap';
 import WalkIcon from '@assets/icons/walk.svg';
 import AirIcon from '@assets/icons/air.svg';
 import NoiseIcon from '@assets/icons/noise.svg';
@@ -24,6 +22,7 @@ import {
   type RouteCandidate,
 } from '@services/routeQuality';
 import { recommendRouteIndex } from '@services/routeRecommendation';
+import { recordDiagnostic } from '@services/diagnostics';
 
 const OWN_LOCATION = 'Мое местоположение';
 
@@ -100,6 +99,7 @@ export default function RoutePlannerScreen() {
       setSelectedId(recommended?.id ?? null);
     } catch (error) {
       console.error('Could not generate route recommendations:', error);
+      await recordDiagnostic('error', 'Route recommendation request failed');
       Alert.alert(
         'Не удалось построить маршруты',
         error instanceof Error ? error.message : 'Проверьте адреса и подключение к интернету.'
@@ -123,13 +123,6 @@ export default function RoutePlannerScreen() {
         <Text style={styles.subtitle}>
           Сравним варианты пешего маршрута по времени, расчетному качеству воздуха и приблизительной близости к крупным дорогам.
         </Text>
-        {Platform.OS === 'android' &&
-          !Constants.expoConfig?.extra?.googleMapsConfigured && (
-            <Text style={styles.keyWarning}>
-              Карта Android требует GOOGLE_MAPS_ANDROID_API_KEY. Маршрут и оценка могут быть доступны, но подложка Google Maps не загрузится до настройки ключа.
-            </Text>
-          )}
-
         <Text style={styles.label}>Откуда</Text>
         <TextInput
           accessibilityLabel="Начальная точка"
@@ -157,7 +150,7 @@ export default function RoutePlannerScreen() {
             {locationDisclosureAccepted && <Text style={styles.checkmark}>✓</Text>}
           </View>
           <Text style={styles.consentText}>
-          Разрешаю передать адреса геокодеру устройства (Apple/Google), а координаты — OpenStreetMap/Valhalla, Open-Meteo и Overpass для расчета маршрута и оценки среды.
+          Разрешаю передать адреса системному геокодеру устройства, а координаты — Valhalla, Open-Meteo и OpenStreetMap Overpass для расчета маршрута и оценки среды. OpenFreeMap также получает запросы тайлов для видимой области карты.
           </Text>
         </TouchableOpacity>
 
@@ -175,21 +168,11 @@ export default function RoutePlannerScreen() {
         </TouchableOpacity>
 
         {selected && selected.coordinates.length > 1 && (
-          <MapView
+          <RouteMap
+            key={selected.id}
             style={styles.map}
-            initialRegion={{
-              latitude: selected.coordinates[0].latitude,
-              longitude: selected.coordinates[0].longitude,
-              latitudeDelta: 0.06,
-              longitudeDelta: 0.06,
-            }}
-          >
-            <Polyline
-              coordinates={selected.coordinates}
-              strokeColor="#168A57"
-              strokeWidth={5}
-            />
-          </MapView>
+            coordinates={selected.coordinates}
+          />
         )}
 
         {candidates.map((candidate, index) => (

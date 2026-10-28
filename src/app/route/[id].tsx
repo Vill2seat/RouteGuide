@@ -9,9 +9,10 @@ import {
   View,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import MapView, { Marker, Polyline } from 'react-native-maps';
+import RouteMap from '@components/RouteMap';
 import { SQLiteDB } from '@services/database';
 import type { Route } from '@services/database';
+import { recordDiagnostic } from '@services/diagnostics';
 
 export default function RouteDetailScreen() {
   const router = useRouter();
@@ -33,6 +34,7 @@ export default function RouteDetailScreen() {
       })
       .catch(error => {
         console.error('Could not load route details:', error);
+        void recordDiagnostic('error', 'Could not load saved route details');
         Alert.alert('Ошибка', 'Не удалось загрузить маршрут.');
       })
       .finally(() => {
@@ -69,7 +71,6 @@ export default function RouteDetailScreen() {
     longitude: point.longitude,
   }));
   const firstPoint = coordinates[0];
-  const lastPoint = coordinates[coordinates.length - 1];
 
   return (
     <View style={styles.container}>
@@ -84,22 +85,7 @@ export default function RouteDetailScreen() {
       </View>
 
       {firstPoint ? (
-        <MapView
-          style={styles.map}
-          initialRegion={{
-            ...firstPoint,
-            latitudeDelta: 0.01,
-            longitudeDelta: 0.01,
-          }}
-        >
-          {coordinates.length > 1 && (
-            <Polyline coordinates={coordinates} strokeColor="#168A57" strokeWidth={4} />
-          )}
-          <Marker coordinate={firstPoint} title="Начало" pinColor="#168A57" />
-          {lastPoint && coordinates.length > 1 && (
-            <Marker coordinate={lastPoint} title="Конец" pinColor="#B42318" />
-          )}
-        </MapView>
+        <RouteMap style={styles.map} coordinates={coordinates} />
       ) : (
         <View style={styles.noPoints}>
           <Text style={styles.message}>Для этого маршрута нет сохраненных точек GPS.</Text>
@@ -138,7 +124,7 @@ const styles = StyleSheet.create({
   },
   backText: { fontSize: 16, color: '#168A57' },
   title: { fontSize: 20, fontWeight: 'bold', color: '#1A1A1A' },
-  map: { flex: 1, minHeight: 280, marginHorizontal: 16, borderRadius: 12 },
+  map: { flex: 1, minHeight: 280, marginHorizontal: 16 },
   noPoints: {
     flex: 1,
     marginHorizontal: 16,
