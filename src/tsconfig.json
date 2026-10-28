@@ -8,8 +8,7 @@
     "noEmit": true,
     "isolatedModules": true,
     "strict": true,
-    "moduleResolution": "node",
-    "baseUrl": "./",
+    "moduleResolution": "bundler",
     "paths": {
       "@components/*": ["./components/*"],
       "@hooks/*": ["./hooks/*"],

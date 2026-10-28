@@ -1,11 +1,12 @@
-import { useEffect, useState } from 'react';
-import { View, Text, Button, StyleSheet, TouchableOpacity } from 'react-native';
+import { useState } from 'react';
+import { Alert, View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import * as Location from 'expo-location';
 import { useRouter } from 'expo-router';
 
 export default function Onboarding() {
   const router = useRouter();
   const [step, setStep] = useState(0);
+  const [requesting, setRequesting] = useState(false);
 
   const steps = [
     {
@@ -14,7 +15,7 @@ export default function Onboarding() {
     },
     {
       title: 'Фоновая запись',
-      text: 'Приложение работает в фоне и фиксирует где вы были, на каком транспорте перемещались.',
+      text: 'С вашего разрешения приложение может записывать маршрут в фоне. Запись включается и выключается вами.',
     },
     {
       title: 'Конфиденциальность',
@@ -23,16 +24,30 @@ export default function Onboarding() {
   ];
 
   const requestPermissions = async () => {
-    const foreground = await Location.requestForegroundPermissionsAsync();
-    const background = await Location.requestBackgroundPermissionsAsync();
+    setRequesting(true);
+    try {
+      const foreground = await Location.requestForegroundPermissionsAsync();
+      if (foreground.status !== 'granted') {
+        Alert.alert(
+          'Геолокация не разрешена',
+          'Без доступа к геолокации приложение не сможет записывать маршруты.'
+        );
+        return;
+      }
 
-    if (
-      foreground.status === 'granted' &&
-      background.status === 'granted'
-    ) {
+      const background = await Location.requestBackgroundPermissionsAsync();
+      if (background.status !== 'granted') {
+        Alert.alert(
+          'Фоновая запись недоступна',
+          'Можно продолжить без фоновой записи. Чтобы записывать маршрут при заблокированном экране, включите фоновую геолокацию в настройках устройства.'
+        );
+      }
       router.replace('/');
-    } else {
-      alert('Необходимо разрешить геолокацию для работы приложения');
+    } catch (error) {
+      console.error('Could not request location permissions:', error);
+      Alert.alert('Ошибка', 'Не удалось запросить разрешения геолокации.');
+    } finally {
+      setRequesting(false);
     }
   };
 
@@ -50,8 +65,14 @@ export default function Onboarding() {
             <Text style={styles.buttonText}>Далее</Text>
           </TouchableOpacity>
         ) : (
-          <TouchableOpacity style={styles.startButton} onPress={requestPermissions}>
-            <Text style={styles.buttonText}>Начать запись</Text>
+          <TouchableOpacity
+            disabled={requesting}
+            style={styles.startButton}
+            onPress={requestPermissions}
+          >
+            <Text style={styles.buttonText}>
+              {requesting ? 'Запрос разрешений…' : 'Продолжить'}
+            </Text>
           </TouchableOpacity>
         )}
       </View>
@@ -107,7 +128,7 @@ const styles = StyleSheet.create({
   startButton: {
     padding: 16,
     borderRadius: 12,
-    backgroundColor: '#007AFF',
+    backgroundColor: '#168A57',
     alignItems: 'center',
   },
 });

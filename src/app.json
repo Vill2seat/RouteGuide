@@ -4,29 +4,19 @@
     "slug": "route-guide",
     "version": "0.1.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
-    "splash": {
-      "image": "./assets/splash.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
-    },
-    "updates": {
-      "url": "https://u.expo.dev/your-project-id"
-    },
-    "runtimeVersion": {
-      "policy": "appVersion"
-    },
-    "assetBundlePatterns": ["**/*"],
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "ios": {
       "supportsTablet": false,
       "infoPlist": {
         "NSLocationAlwaysAndWhenInUseUsageDescription": "Route Guide needs access to your location even when the app is closed to record your routes.",
         "NSLocationWhenInUseUsageDescription": "Route Guide needs access to your location to record your route while you're using the app.",
-        "UIBackgroundModes": ["location", "fetch"],
-        "NSMotionUsageDescription": "Route Guide uses motion data to detect your mode of transport.",
-        "NSAppleMusicUsageDescription": false
+        "UIBackgroundModes": [
+          "location"
+        ]
       },
       "bundleIdentifier": "com.routeguide.app"
     },
@@ -36,18 +26,10 @@
         "ACCESS_COARSE_LOCATION",
         "ACCESS_BACKGROUND_LOCATION",
         "FOREGROUND_SERVICE",
-        "FOREGROUND_SERVICE_LOCATION",
-        "ACTIVITY_RECOGNITION"
+        "FOREGROUND_SERVICE_LOCATION"
       ],
       "package": "com.routeguide.app",
-      "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
-      },
       "edgeEnabled": true
-    },
-    "web": {
-      "favicon": "./assets/favicon.png"
     },
     "plugins": [
       "expo-router",
@@ -57,8 +39,8 @@
           "locationAlwaysAndWhenInUsePermission": "Route Guide needs access to your location even when the app is closed to record your routes."
         }
       ],
-      "expo-background-fetch",
-      "expo-task-manager"
+      "expo-task-manager",
+      "expo-sqlite"
     ]
   }
 }
