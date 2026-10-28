@@ -1,7 +1,6 @@
 module.exports = {
   presets: ['babel-preset-expo'],
   plugins: [
-    'expo-router/babel',
     [
       'babel-plugin-module-resolver',
       {
@@ -15,5 +14,6 @@ module.exports = {
         },
       },
     ],
+    'react-native-worklets/plugin',
   ],
 };

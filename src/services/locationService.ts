@@ -1,39 +1,58 @@
-import * as TaskManager from 'expo-task-manager';
 import * as Location from 'expo-location';
+import * as TaskManager from 'expo-task-manager';
 import { SQLiteDB } from './database';
-import type { RoutePoint } from './database';
 
 export const locationTaskName = 'route-guide-location-task';
 
-TaskManager.defineTask(locationTaskName, ({ data, error }) => {
-  if (error) return;
-  if (data) {
-    const locations = data.locations as Location.LocationObject[];
-    // Handle background location events
-    console.log('Background location update:', locations.length, 'points');
-  }
-});
+if (!TaskManager.isTaskDefined(locationTaskName)) {
+  TaskManager.defineTask<{ locations: Location.LocationObject[] }>(
+    locationTaskName,
+    async ({ data, error }) => {
+      if (error) {
+        console.error('Background location task failed:', error);
+        return;
+      }
+      if (!data?.locations.length) return;
 
-export async function startLocationTask() {
-  try {
-    await Location.startLocationUpdatesAsync(locationTaskName, {
-      accuracy: Location.Accuracy.Balanced,
-      distanceInterval: 10,
-      timeInterval: 60000,
-      foreground: {
-        interval: 60000,
-        delayFastestInterval: 5000,
-      },
-    });
-  } catch (e) {
-    console.log('Location task already running or not permitted');
-  }
+      try {
+        await SQLiteDB.appendLocations(data.locations);
+      } catch (databaseError) {
+        console.error('Could not save background location updates:', databaseError);
+      }
+    }
+  );
 }
 
-export async function stopLocationTask() {
-  try {
+export async function startLocationTask(): Promise<void> {
+  const foreground = await Location.getForegroundPermissionsAsync();
+  if (foreground.status !== 'granted') {
+    throw new Error('Для записи маршрута требуется разрешение на геолокацию.');
+  }
+
+  const background = await Location.getBackgroundPermissionsAsync();
+  if (background.status !== 'granted') {
+    throw new Error('Разрешите фоновую геолокацию в настройках устройства.');
+  }
+
+  const alreadyStarted = await Location.hasStartedLocationUpdatesAsync(locationTaskName);
+  if (alreadyStarted) return;
+
+  await Location.startLocationUpdatesAsync(locationTaskName, {
+    accuracy: Location.Accuracy.Balanced,
+    distanceInterval: 10,
+    timeInterval: 60000,
+    pausesUpdatesAutomatically: false,
+    foregroundService: {
+      notificationTitle: 'Route Guide записывает маршрут',
+      notificationBody: 'Нажмите, чтобы открыть приложение и остановить запись.',
+      notificationColor: '#168A57',
+    },
+  });
+}
+
+export async function stopLocationTask(): Promise<void> {
+  const isStarted = await Location.hasStartedLocationUpdatesAsync(locationTaskName);
+  if (isStarted) {
     await Location.stopLocationUpdatesAsync(locationTaskName);
-  } catch (e) {
-    console.log('Error stopping location task');
   }
 }
