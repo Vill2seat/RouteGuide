@@ -1,6 +1,7 @@
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
 import { SQLiteDB } from './database';
+import { recordDiagnostic } from './diagnostics';
 
 export const locationTaskName = 'route-guide-location-task';
 
@@ -10,6 +11,7 @@ if (!TaskManager.isTaskDefined(locationTaskName)) {
     async ({ data, error }) => {
       if (error) {
         console.error('Background location task failed:', error);
+        await recordDiagnostic('error', 'Background location task reported an error');
         return;
       }
       if (!data?.locations.length) return;
@@ -18,6 +20,7 @@ if (!TaskManager.isTaskDefined(locationTaskName)) {
         await SQLiteDB.appendLocations(data.locations);
       } catch (databaseError) {
         console.error('Could not save background location updates:', databaseError);
+        await recordDiagnostic('error', 'Could not save a background location update');
       }
     }
   );

@@ -1,4 +1,6 @@
 import * as SQLite from 'expo-sqlite';
+import * as Crypto from 'expo-crypto';
+import * as SecureStore from 'expo-secure-store';
 import type * as Location from 'expo-location';
 import { classifyTransport } from './transportClassifier';
 
@@ -25,6 +27,17 @@ export type Route = {
   points: RoutePoint[];
 };
 
+export type LocalProfile = {
+  displayName: string;
+  createdAt: Date;
+};
+
+export type DiagnosticLog = {
+  createdAt: Date;
+  level: 'info' | 'warning' | 'error';
+  message: string;
+};
+
 type RouteRow = {
   id: string;
   start_time: string;
@@ -34,6 +47,17 @@ type RouteRow = {
   transport_mode: string;
   transport_confidence: number | null;
   mode_locked: number;
+};
+
+type ProfileRow = {
+  display_name: string;
+  created_at: string;
+};
+
+type DiagnosticLogRow = {
+  created_at: string;
+  level: DiagnosticLog['level'];
+  message: string;
 };
 
 type PointRow = {
@@ -48,6 +72,9 @@ type PointRow = {
 };
 
 class RouteDatabase {
+  private static readonly encryptionKeyName = 'route-guide-sqlite-key';
+  private static readonly databaseName = 'route_guide.db';
+  private static readonly encryptedDatabaseName = 'route_guide_encrypted.db';
   private db: SQLite.SQLiteDatabase | null = null;
   private initializing: Promise<void> | null = null;
 
@@ -55,7 +82,74 @@ class RouteDatabase {
     if (this.db) return;
     if (!this.initializing) {
       this.initializing = (async () => {
-        const db = await SQLite.openDatabaseAsync('route_guide.db');
+        const key = await SecureStore.getItemAsync(
+          RouteDatabase.encryptionKeyName
+        );
+        let db: SQLite.SQLiteDatabase;
+
+        if (key) {
+          db = await SQLite.openDatabaseAsync(RouteDatabase.encryptedDatabaseName);
+          try {
+            await db.execAsync(`PRAGMA key = "x'${key}'";`);
+            await this.verifyCipher(db);
+            await db.getFirstAsync('SELECT count(*) FROM sqlite_master');
+            await this.deleteDatabaseFile(RouteDatabase.databaseName);
+          } catch (error) {
+            await db.closeAsync();
+            throw error;
+          }
+        } else {
+          const legacyDb = await SQLite.openDatabaseAsync(RouteDatabase.databaseName);
+          try {
+            await this.verifyCipher(legacyDb);
+          } catch (error) {
+            await legacyDb.closeAsync();
+            throw error;
+          }
+          const bytes = await Crypto.getRandomBytesAsync(32);
+          const newKey = Array.from(bytes, byte =>
+            byte.toString(16).padStart(2, '0')
+          ).join('');
+
+          let legacyDbOpen = true;
+          try {
+            await this.deleteDatabaseFile(RouteDatabase.encryptedDatabaseName);
+            const directory = legacyDb.databasePath.slice(
+              0,
+              legacyDb.databasePath.lastIndexOf('/')
+            );
+            const encryptedPath =
+              `${directory}/${RouteDatabase.encryptedDatabaseName}`.replace(/'/g, "''");
+            await legacyDb.execAsync(`
+              ATTACH DATABASE '${encryptedPath}' AS encrypted KEY "x'${newKey}'";
+              SELECT sqlcipher_export('encrypted');
+              DETACH DATABASE encrypted;
+            `);
+            await legacyDb.closeAsync();
+            legacyDbOpen = false;
+          } catch (error) {
+            if (legacyDbOpen) await legacyDb.closeAsync();
+            await this.deleteDatabaseFile(RouteDatabase.encryptedDatabaseName);
+            throw new Error('Не удалось включить шифрование локальной базы данных.', {
+              cause: error,
+            });
+          }
+
+          db = await SQLite.openDatabaseAsync(RouteDatabase.encryptedDatabaseName);
+          try {
+            await db.execAsync(`PRAGMA key = "x'${newKey}'";`);
+            await this.verifyCipher(db);
+            await db.getFirstAsync('SELECT count(*) FROM sqlite_master');
+            await SecureStore.setItemAsync(
+              RouteDatabase.encryptionKeyName,
+              newKey
+            );
+            await this.deleteDatabaseFile(RouteDatabase.databaseName);
+          } catch (error) {
+            await db.closeAsync();
+            throw error;
+          }
+        }
         await db.execAsync(`
           PRAGMA foreign_keys = ON;
           CREATE TABLE IF NOT EXISTS routes (
@@ -85,6 +179,20 @@ class RouteDatabase {
             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
             route_id TEXT NOT NULL REFERENCES routes(id)
           );
+          CREATE TABLE IF NOT EXISTS local_profile (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            display_name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS diagnostic_logs (
+            id TEXT PRIMARY KEY NOT NULL,
+            created_at TEXT NOT NULL,
+            level TEXT NOT NULL CHECK (level IN ('info', 'warning', 'error')),
+            message TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS diagnostic_logs_created_at
+            ON diagnostic_logs(created_at);
         `);
         const routeColumns = await db.getAllAsync<{ name: string }>(
           'PRAGMA table_info(routes)'
@@ -103,6 +211,21 @@ class RouteDatabase {
       });
     }
     await this.initializing;
+  }
+
+  private async verifyCipher(db: SQLite.SQLiteDatabase): Promise<void> {
+    const cipher = await db.getFirstAsync<{ cipher_version: string }>(
+      'PRAGMA cipher_version'
+    );
+    if (!cipher?.cipher_version) {
+      throw new Error('В этой сборке приложения не включено шифрование базы данных.');
+    }
+  }
+
+  private async deleteDatabaseFile(name: string): Promise<void> {
+    const database = await SQLite.openDatabaseAsync(name);
+    await database.closeAsync();
+    await SQLite.deleteDatabaseAsync(name);
   }
 
   private async database(): Promise<SQLite.SQLiteDatabase> {
@@ -145,6 +268,73 @@ class RouteDatabase {
       'SELECT route_id FROM active_tracking WHERE singleton = 1'
     );
     return row?.route_id ?? null;
+  }
+
+  async getLocalProfile(): Promise<LocalProfile | null> {
+    const db = await this.database();
+    const row = await db.getFirstAsync<ProfileRow>(
+      'SELECT display_name, created_at FROM local_profile WHERE singleton = 1'
+    );
+    return row
+      ? { displayName: row.display_name, createdAt: new Date(row.created_at) }
+      : null;
+  }
+
+  async saveLocalProfile(displayName: string): Promise<void> {
+    const normalizedName = displayName.trim();
+    if (normalizedName.length < 2 || normalizedName.length > 50) {
+      throw new Error('Имя профиля должно содержать от 2 до 50 символов.');
+    }
+
+    const db = await this.database();
+    const now = new Date().toISOString();
+    await db.runAsync(
+      `INSERT INTO local_profile (singleton, display_name, created_at, updated_at)
+       VALUES (1, ?, ?, ?)
+       ON CONFLICT(singleton) DO UPDATE SET
+         display_name = excluded.display_name,
+         updated_at = excluded.updated_at`,
+      [normalizedName, now, now]
+    );
+  }
+
+  async addDiagnosticLog(
+    level: DiagnosticLog['level'],
+    message: string
+  ): Promise<void> {
+    const db = await this.database();
+    await db.runAsync(
+      'INSERT INTO diagnostic_logs (id, created_at, level, message) VALUES (?, ?, ?, ?)',
+      [
+        `log_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        new Date().toISOString(),
+        level,
+        message.slice(0, 500),
+      ]
+    );
+    await db.runAsync(
+      `DELETE FROM diagnostic_logs
+       WHERE id NOT IN (
+         SELECT id FROM diagnostic_logs ORDER BY created_at DESC LIMIT 500
+       )`
+    );
+  }
+
+  async getDiagnosticLogs(): Promise<DiagnosticLog[]> {
+    const db = await this.database();
+    const rows = await db.getAllAsync<DiagnosticLogRow>(
+      'SELECT created_at, level, message FROM diagnostic_logs ORDER BY created_at DESC LIMIT 500'
+    );
+    return rows.map(row => ({
+      createdAt: new Date(row.created_at),
+      level: row.level,
+      message: row.message,
+    }));
+  }
+
+  async clearDiagnosticLogs(): Promise<void> {
+    const db = await this.database();
+    await db.runAsync('DELETE FROM diagnostic_logs');
   }
 
   async appendLocations(locations: Location.LocationObject[]): Promise<void> {
@@ -293,11 +483,11 @@ class RouteDatabase {
           active.route_id,
         ]
       );
+      await db.runAsync('DELETE FROM active_tracking WHERE singleton = 1');
       await db.runAsync(
         'DELETE FROM routes WHERE id = ? AND NOT EXISTS (SELECT 1 FROM route_points WHERE route_id = ?)',
         [active.route_id, active.route_id]
       );
-      await db.runAsync('DELETE FROM active_tracking WHERE singleton = 1');
     });
   }
 
@@ -338,6 +528,17 @@ class RouteDatabase {
       await db.runAsync('DELETE FROM active_tracking');
       await db.runAsync('DELETE FROM route_points');
       await db.runAsync('DELETE FROM routes');
+    });
+  }
+
+  async clearAllLocalData(): Promise<void> {
+    const db = await this.database();
+    await db.withTransactionAsync(async () => {
+      await db.runAsync('DELETE FROM active_tracking');
+      await db.runAsync('DELETE FROM route_points');
+      await db.runAsync('DELETE FROM routes');
+      await db.runAsync('DELETE FROM diagnostic_logs');
+      await db.runAsync('DELETE FROM local_profile');
     });
   }
 

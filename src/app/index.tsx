@@ -12,6 +12,7 @@ import { useFocusEffect, useRouter } from 'expo-router';
 import * as Location from 'expo-location';
 import { SQLiteDB } from '@services/database';
 import type { Route } from '@services/database';
+import { recordDiagnostic } from '@services/diagnostics';
 import RouteIcon from '@assets/icons/route.svg';
 
 export default function HomeScreen() {
@@ -21,12 +22,18 @@ export default function HomeScreen() {
 
   useEffect(() => {
     let active = true;
-    Location.getForegroundPermissionsAsync()
-      .then(({ status }) => {
-        if (active && status !== 'granted') router.replace('/onboarding');
+    Promise.all([
+      SQLiteDB.getLocalProfile(),
+      Location.getForegroundPermissionsAsync(),
+    ])
+      .then(([profile, permission]) => {
+        if (active && (!profile || permission.status !== 'granted')) {
+          router.replace('/onboarding');
+        }
       })
       .catch(error => {
         console.error('Could not check location permission:', error);
+        void recordDiagnostic('error', 'Could not check onboarding and location status');
         Alert.alert('Ошибка', 'Не удалось проверить разрешение геолокации.');
       });
 
@@ -45,6 +52,7 @@ export default function HomeScreen() {
         })
         .catch(error => {
           console.error('Could not load route history:', error);
+          void recordDiagnostic('error', 'Could not load route history on the home screen');
           Alert.alert('Ошибка', 'Не удалось загрузить историю маршрутов.');
         })
         .finally(() => {

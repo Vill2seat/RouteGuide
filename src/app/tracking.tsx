@@ -11,6 +11,7 @@ import { useFocusEffect, useRouter } from 'expo-router';
 import { SQLiteDB } from '@services/database';
 import type { Route } from '@services/database';
 import { startLocationTask, stopLocationTask } from '@services/locationService';
+import { recordDiagnostic } from '@services/diagnostics';
 import WalkIcon from '@assets/icons/walk.svg';
 import BicycleIcon from '@assets/icons/bicycle.svg';
 import CarIcon from '@assets/icons/car.svg';
@@ -42,12 +43,16 @@ export default function TrackingScreen() {
       let active = true;
       refreshActiveRoute().catch(error => {
         console.error('Could not restore active recording:', error);
+        void recordDiagnostic('error', 'Could not restore active route recording');
         Alert.alert('Ошибка', 'Не удалось восстановить состояние записи.');
       });
       const interval = setInterval(() => {
         if (active) {
           refreshActiveRoute().catch(error =>
-            console.error('Could not refresh active route:', error)
+            {
+              console.error('Could not refresh active route:', error);
+              void recordDiagnostic('error', 'Could not refresh active route recording');
+            }
           );
         }
       }, 5000);
@@ -74,6 +79,7 @@ export default function TrackingScreen() {
       );
       try {
         await startLocationTask();
+        await recordDiagnostic('info', 'Route recording started');
       } catch (error) {
         await SQLiteDB.finishRoute();
         throw error;
@@ -81,6 +87,7 @@ export default function TrackingScreen() {
       await refreshActiveRoute();
     } catch (error) {
       console.error('Could not start route recording:', error);
+      await recordDiagnostic('error', 'Route recording could not be started');
       Alert.alert(
         'Не удалось начать запись',
         error instanceof Error ? error.message : 'Проверьте разрешения геолокации.'
@@ -101,6 +108,7 @@ export default function TrackingScreen() {
       .then(refreshActiveRoute)
       .catch(error => {
         console.error('Could not correct transport mode:', error);
+        void recordDiagnostic('error', 'Could not save manual transport mode');
         Alert.alert('Ошибка', 'Не удалось сохранить выбранный тип транспорта.');
       });
   };
@@ -110,10 +118,12 @@ export default function TrackingScreen() {
     try {
       await stopLocationTask();
       await SQLiteDB.finishRoute();
+      await recordDiagnostic('info', 'Route recording stopped');
       await refreshActiveRoute();
       router.replace('/');
     } catch (error) {
       console.error('Could not stop route recording:', error);
+      await recordDiagnostic('error', 'Route recording could not be stopped');
       Alert.alert('Ошибка', 'Не удалось корректно завершить запись.');
     } finally {
       setBusy(false);

@@ -11,6 +11,7 @@ import {
 import { useFocusEffect, useRouter } from 'expo-router';
 import { SQLiteDB } from '@services/database';
 import type { Route } from '@services/database';
+import { recordDiagnostic } from '@services/diagnostics';
 
 export default function HistoryScreen() {
   const router = useRouter();
@@ -25,6 +26,7 @@ export default function HistoryScreen() {
         })
         .catch(error => {
           console.error('Could not load route history:', error);
+          void recordDiagnostic('error', 'Could not load route history');
           Alert.alert('Ошибка', 'Не удалось загрузить историю маршрутов.');
         });
       return () => {
@@ -49,6 +51,7 @@ export default function HistoryScreen() {
             .then(setRoutes)
             .catch(error => {
               console.error('Could not delete route:', error);
+              void recordDiagnostic('error', 'Could not delete a saved route');
               Alert.alert('Ошибка', 'Не удалось удалить маршрут.');
             });
         },

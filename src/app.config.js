@@ -1,26 +1,34 @@
 require('dotenv').config();
 
-const app = require('./app.json').expo;
+const baseApp = require('./app.json').expo;
 
 module.exports = ({ config }) => {
-  const googleMapsApiKey = process.env.GOOGLE_MAPS_ANDROID_API_KEY;
-
-  if (googleMapsApiKey) {
-    app.android = {
-      ...app.android,
-      config: {
-        ...app.android?.config,
-        googleMaps: { apiKey: googleMapsApiKey },
-      },
-    };
-  }
-
-  app.extra = {
-    ...config.extra,
-    googleMapsConfigured: Boolean(googleMapsApiKey),
-    routingEndpoint:
-      process.env.EXPO_PUBLIC_ROUTING_ENDPOINT ??
-      'https://valhalla1.openstreetmap.de/route',
+  const app = {
+    ...baseApp,
+    plugins: [
+      ...(baseApp.plugins ?? []).filter(
+        plugin => plugin !== 'expo-sqlite'
+      ),
+      ['expo-sqlite', { useSQLCipher: true }],
+      ['expo-secure-store', { configureAndroidBackup: true }],
+      '@maplibre/maplibre-react-native',
+    ],
+    extra: {
+      ...config.extra,
+      mapProvider: 'openfreemap',
+      mapStyleUrl:
+        process.env.EXPO_PUBLIC_MAP_STYLE_URL ??
+        'https://tiles.openfreemap.org/styles/liberty',
+      routingEndpoint:
+        process.env.EXPO_PUBLIC_ROUTING_ENDPOINT ??
+        'https://valhalla1.openstreetmap.de/route',
+      airQualityEndpoint:
+        process.env.EXPO_PUBLIC_AIR_QUALITY_ENDPOINT ??
+        'https://air-quality-api.open-meteo.com/v1/air-quality',
+      osmQueryEndpoint:
+        process.env.EXPO_PUBLIC_OSM_QUERY_ENDPOINT ??
+        'https://overpass-api.de/api/interpreter',
+    },
   };
 
   return { ...config, ...app };

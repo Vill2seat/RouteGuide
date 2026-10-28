@@ -29,6 +29,7 @@
         "FOREGROUND_SERVICE_LOCATION"
       ],
       "package": "com.routeguide.app",
+      "allowBackup": false,
       "edgeEnabled": true
     },
     "plugins": [
