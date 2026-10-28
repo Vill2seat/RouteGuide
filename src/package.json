@@ -1,0 +1,24 @@
+{
+  "name": "route-guide",
+  "version": "0.1.0",
+  "main": "node_modules/expo/AppEntry.js",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web"
+  },
+  "dependencies": {
+    "expo": "~52.0.28",
+    "expo-location": "~17.0.1",
+    "expo-sqlite": "~15.0.3",
+    "expo-router": "~4.0.11",
+    "react": "18.3.1",
+    "react-native": "0.76.7"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.25.2",
+    "typescript": "~5.3.3"
+  },
+  "private": true
+}
