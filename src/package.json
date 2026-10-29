@@ -8,6 +8,7 @@
     "ios": "expo run:ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
+    "test": "node --test services/transportClassifier.test.cjs services/routeRecommendation.test.cjs services/routeService.test.cjs services/database.test.cjs services/locationService.test.cjs services/dayTimeline.test.cjs services/cityConditions.test.cjs route_guide_analysis.test.cjs",
     "test:classifier": "node --test services/transportClassifier.test.cjs services/routeRecommendation.test.cjs"
   },
   "dependencies": {

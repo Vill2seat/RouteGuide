@@ -1,11 +1,12 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const ts = require('typescript');
 const fs = require('node:fs');
+const path = require('node:path');
+const ts = require('typescript');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(
-  new URL('./routeRecommendation.ts', `file://${__dirname}/`),
+  path.join(__dirname, 'routeRecommendation.ts'),
   'utf8'
 );
 const javascript = ts.transpile(source, {
@@ -19,37 +20,39 @@ vm.runInNewContext(javascript, {
 });
 const { recommendRouteIndex } = loadedModule.exports;
 
-test('prefers environmental quality only within five minutes of the fastest route', () => {
+test('selects the fastest route using duration only', () => {
   assert.equal(
     recommendRouteIndex([
-      { durationMinutes: 20, qualityScore: 60 },
-      { durationMinutes: 25, qualityScore: 90 },
-      { durationMinutes: 26, qualityScore: 100 },
-    ]),
-    1
-  );
-});
-
-test('uses the fastest route when eligible routes have no environmental scores', () => {
-  assert.equal(
-    recommendRouteIndex([
-      { durationMinutes: 18, qualityScore: null },
-      { durationMinutes: 20, qualityScore: null },
+      { durationMinutes: 20, qualityScore: 100 },
+      { durationMinutes: 25, qualityScore: 0 },
+      { durationMinutes: 26, qualityScore: 0 },
     ]),
     0
   );
 });
 
-test('prefers the quicker route when eligible environmental scores tie', () => {
+test('selects the first route when durations tie', () => {
   assert.equal(
     recommendRouteIndex([
-      { durationMinutes: 20, qualityScore: 80 },
-      { durationMinutes: 23, qualityScore: 80 },
+      { durationMinutes: 20 },
+      { durationMinutes: 20 },
     ]),
     0
   );
 });
 
-test('returns no index when there are no routes', () => {
+test('ignores invalid durations when finding the fastest option', () => {
+  assert.equal(
+    recommendRouteIndex([
+      { durationMinutes: -1 },
+      { durationMinutes: Number.NaN },
+      { durationMinutes: 18 },
+    ]),
+    2
+  );
+});
+
+test('returns no index when there are no routes or no valid durations', () => {
   assert.equal(recommendRouteIndex([]), -1);
+  assert.equal(recommendRouteIndex([{ durationMinutes: Number.POSITIVE_INFINITY }]), -1);
 });

@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   Alert,
   StatusBar,
   StyleSheet,
@@ -8,14 +9,14 @@ import {
   View,
 } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { SQLiteDB } from '@services/database';
-import type { Route } from '@services/database';
-import { startLocationTask, stopLocationTask } from '@services/locationService';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { SQLiteDB, type Route } from '@services/database';
+import {
+  disableAutomaticRecording,
+  ensureAutomaticRecording,
+  startLocationTask,
+} from '@services/locationService';
 import { recordDiagnostic } from '@services/diagnostics';
-import WalkIcon from '@assets/icons/walk.svg';
-import BicycleIcon from '@assets/icons/bicycle.svg';
-import CarIcon from '@assets/icons/car.svg';
-import TransitIcon from '@assets/icons/transit.svg';
 
 const transportModes = [
   'Пешком',
@@ -28,226 +29,196 @@ const transportModes = [
 
 export default function TrackingScreen() {
   const router = useRouter();
-  const [activeRoute, setActiveRoute] = useState<Route | null>(null);
-  const [transportIndex, setTransportIndex] = useState(0);
-  const [autoDetect, setAutoDetect] = useState(true);
+  const busyRef = useRef(false);
+  const screenFocused = useRef(false);
+  const [route, setRoute] = useState<Route | null>(null);
+  const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
 
-  const refreshActiveRoute = useCallback(async () => {
+  const refreshRoute = useCallback(async () => {
     const activeId = await SQLiteDB.getActiveRouteId();
-    setActiveRoute(activeId ? await SQLiteDB.getRouteById(activeId) : null);
+    const activeRoute = activeId
+      ? await SQLiteDB.getRouteById(activeId, 1_500)
+      : null;
+    if (screenFocused.current) setRoute(activeRoute);
   }, []);
 
   useFocusEffect(
     useCallback(() => {
       let active = true;
-      refreshActiveRoute().catch(error => {
-        console.error('Could not restore active recording:', error);
-        void recordDiagnostic('error', 'Could not restore active route recording');
-        Alert.alert('Ошибка', 'Не удалось восстановить состояние записи.');
-      });
+      screenFocused.current = true;
+      const refresh = async () => {
+        try {
+          if (await SQLiteDB.isAutomaticRecordingEnabled()) {
+            await ensureAutomaticRecording();
+          }
+          const activeId = await SQLiteDB.getActiveRouteId();
+          const currentRoute = activeId
+            ? await SQLiteDB.getRouteById(activeId, 1_500)
+            : null;
+          if (active) setRoute(currentRoute);
+        } catch (error) {
+          console.error('Could not restore active recording:', error);
+          void recordDiagnostic('error', 'Could not restore active route recording');
+          if (active) {
+            Alert.alert('Ошибка записи', 'Не удалось восстановить состояние записи.');
+          }
+        } finally {
+          if (active) setLoading(false);
+        }
+      };
+      void refresh();
       const interval = setInterval(() => {
         if (active) {
-          refreshActiveRoute().catch(error =>
-            {
-              console.error('Could not refresh active route:', error);
-              void recordDiagnostic('error', 'Could not refresh active route recording');
-            }
-          );
+          refreshRoute().catch(error => {
+            console.error('Could not refresh active route:', error);
+            void recordDiagnostic('error', 'Could not refresh active route recording');
+          });
         }
-      }, 5000);
+      }, 15_000);
       return () => {
         active = false;
+        screenFocused.current = false;
         clearInterval(interval);
       };
-    }, [refreshActiveRoute])
+    }, [refreshRoute])
   );
 
-  useEffect(() => {
-    if (activeRoute) {
-      const index = transportModes.indexOf(activeRoute.transportMode);
-      if (index >= 0) setTransportIndex(index);
-    }
-  }, [activeRoute]);
-
-  const startTracking = async () => {
+  async function beginRecording() {
+    if (busyRef.current) return;
+    busyRef.current = true;
     setBusy(true);
     try {
-      await SQLiteDB.startRoute(
-        autoDetect ? 'Определяется' : transportModes[transportIndex],
-        !autoDetect
-      );
+      const activeId = await SQLiteDB.getActiveRouteId();
+      if (!activeId) await SQLiteDB.startRoute('Определяется');
       try {
         await startLocationTask();
-        await recordDiagnostic('info', 'Route recording started');
       } catch (error) {
-        await SQLiteDB.finishRoute();
+        if (!activeId) await SQLiteDB.finishRoute();
         throw error;
       }
-      await refreshActiveRoute();
+      await SQLiteDB.setAutomaticRecordingEnabled(true);
+      await recordDiagnostic('info', 'Route recording started from tracking screen');
+      await refreshRoute();
     } catch (error) {
       console.error('Could not start route recording:', error);
-      await recordDiagnostic('error', 'Route recording could not be started');
+      void recordDiagnostic('error', 'Route recording could not be started');
       Alert.alert(
         'Не удалось начать запись',
         error instanceof Error ? error.message : 'Проверьте разрешения геолокации.'
       );
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
-  };
+  }
 
-  const changeTransportMode = () => {
-    if (!activeRoute) return;
-    const nextMode =
-      transportModes[
-        (transportModes.indexOf(activeRoute.transportMode) + 1 + transportModes.length) %
-          transportModes.length
-      ];
-    SQLiteDB.setManualTransportMode(activeRoute.id, nextMode)
-      .then(refreshActiveRoute)
-      .catch(error => {
-        console.error('Could not correct transport mode:', error);
-        void recordDiagnostic('error', 'Could not save manual transport mode');
-        Alert.alert('Ошибка', 'Не удалось сохранить выбранный тип транспорта.');
-      });
-  };
-
-  const stopTracking = async () => {
+  async function stopRecording() {
+    if (busyRef.current) return;
+    busyRef.current = true;
     setBusy(true);
     try {
-      await stopLocationTask();
-      await SQLiteDB.finishRoute();
-      await recordDiagnostic('info', 'Route recording stopped');
-      await refreshActiveRoute();
+      await disableAutomaticRecording();
+      await recordDiagnostic('info', 'Route recording stopped from tracking screen');
+      await refreshRoute();
       router.replace('/');
     } catch (error) {
       console.error('Could not stop route recording:', error);
-      await recordDiagnostic('error', 'Route recording could not be stopped');
+      void recordDiagnostic('error', 'Route recording could not be stopped');
       Alert.alert('Ошибка', 'Не удалось корректно завершить запись.');
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
-  };
+  }
 
-  const isTracking = activeRoute !== null;
-  const activeMode = isTracking
-    ? activeRoute.transportMode
-    : autoDetect
-      ? 'Определяется'
-      : transportModes[transportIndex];
-  const ModeIcon =
-    activeMode === 'Пешком'
-      ? WalkIcon
-      : activeMode === 'Велосипед'
-        ? BicycleIcon
-        : ['Автобус/трамвай', 'Поезд/метро'].includes(activeMode)
-          ? TransitIcon
-          : CarIcon;
+  async function cycleTransportMode() {
+    if (!route) return;
+    const currentIndex = transportModes.indexOf(route.transportMode);
+    const nextMode =
+      transportModes[(currentIndex + 1 + transportModes.length) % transportModes.length];
+    try {
+      await SQLiteDB.setManualTransportMode(route.id, nextMode);
+      await refreshRoute();
+    } catch (error) {
+      console.error('Could not correct transport mode:', error);
+      void recordDiagnostic('error', 'Could not save manual transport mode');
+      Alert.alert('Ошибка', 'Не удалось сохранить выбранный тип транспорта.');
+    }
+  }
+
+  const isTracking = route !== null;
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
       <StatusBar barStyle="dark-content" />
-      <View style={styles.header}>
-        <Text style={styles.title}>{isTracking ? 'Запись активна' : 'Готов к записи'}</Text>
-        <View style={styles.modeRow}>
-          <ModeIcon width={22} height={22} color="#168A57" />
-          <Text style={styles.subtitle}>Транспорт: {activeMode}</Text>
-        </View>
-        {isTracking && activeRoute.transportConfidence !== null && (
-          <Text style={styles.note}>
-            Оценка уверенности: {Math.round(activeRoute.transportConfidence * 100)}%. Определение по скорости GPS.
-          </Text>
-        )}
-        {isTracking && (
-          <Text style={styles.stats}>
-            {activeRoute.distance.toFixed(2)} км · {Math.round(activeRoute.duration / 60)} мин ·{' '}
-            {activeRoute.points.length} точек
-          </Text>
-        )}
-      </View>
-
-      {!isTracking && (
-        <>
-          <TouchableOpacity
-            accessibilityRole="switch"
-            accessibilityState={{ checked: autoDetect }}
-            style={styles.transportButton}
-            onPress={() => setAutoDetect(value => !value)}
-          >
-            <Text style={styles.transportText}>
-              {autoDetect ? 'Автоопределение включено' : 'Выбрать транспорт вручную'}
+      <View style={styles.content}>
+        <Text style={styles.title}>
+          {loading ? 'Проверяем запись…' : isTracking ? 'Запись активна' : 'Запись остановлена'}
+        </Text>
+        {loading ? (
+          <ActivityIndicator color="#168A57" style={styles.loading} />
+        ) : (
+          <>
+            <Text style={styles.transport}>
+              Транспорт: {route?.transportMode ?? 'Определяется'}
             </Text>
-          </TouchableOpacity>
-          {!autoDetect && (
+            {route && (
+              <>
+                <Text style={styles.stats}>
+                  {route.distance.toFixed(2)} км · {Math.round(route.duration / 60)} мин ·{' '}
+                  {route.points.length} точек
+                </Text>
+                <TouchableOpacity
+                  accessibilityRole="button"
+                  disabled={busy}
+                  onPress={() => void cycleTransportMode()}
+                  style={styles.secondaryButton}
+                >
+                  <Text style={styles.secondaryText}>Изменить вид транспорта</Text>
+                </TouchableOpacity>
+              </>
+            )}
             <TouchableOpacity
               accessibilityRole="button"
-              style={styles.transportButton}
-              onPress={() =>
-                setTransportIndex(index => (index + 1) % transportModes.length)
-              }
+              disabled={busy}
+              onPress={() => void (isTracking ? stopRecording() : beginRecording())}
+              style={[styles.actionButton, isTracking && styles.stopButton, busy && styles.disabled]}
             >
-              <Text style={styles.transportText}>
-                Тип: {transportModes[transportIndex]} · изменить
+              <Text style={styles.actionText}>
+                {busy ? 'Подождите…' : isTracking ? 'Остановить запись' : 'Начать запись'}
               </Text>
             </TouchableOpacity>
-          )}
-        </>
-      )}
-
-      {isTracking && (
-        <TouchableOpacity
-          accessibilityRole="button"
-          style={styles.transportButton}
-          onPress={changeTransportMode}
-        >
-          <Text style={styles.transportText}>Изменить тип транспорта</Text>
-        </TouchableOpacity>
-      )}
-
-      <TouchableOpacity
-        accessibilityRole="button"
-        disabled={busy}
-        style={[styles.actionButton, isTracking && styles.stopButton, busy && styles.disabled]}
-        onPress={isTracking ? stopTracking : startTracking}
-      >
-        <Text style={styles.actionText}>
-          {busy ? 'Подождите…' : isTracking ? 'Завершить запись' : 'Начать запись'}
-        </Text>
-      </TouchableOpacity>
-    </View>
+          </>
+        )}
+      </View>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#FFFFFF',
-    padding: 24,
-    justifyContent: 'center',
-  },
-  header: { alignItems: 'center', marginBottom: 40 },
-  title: { fontSize: 28, fontWeight: 'bold', color: '#1A1A1A' },
-  subtitle: { fontSize: 16, color: '#666666', marginTop: 8 },
-  stats: { fontSize: 14, color: '#666666', marginTop: 8 },
-  modeRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  note: { fontSize: 12, color: '#666666', marginTop: 6, textAlign: 'center' },
-  actionButton: {
-    width: '100%',
-    padding: 20,
-    borderRadius: 16,
-    backgroundColor: '#168A57',
+  container: { flex: 1, backgroundColor: '#FFFFFF' },
+  content: { flex: 1, justifyContent: 'center', padding: 24 },
+  title: { color: '#202D26', fontSize: 26, fontWeight: '600', textAlign: 'center' },
+  transport: { color: '#526158', fontSize: 16, marginTop: 16, textAlign: 'center' },
+  stats: { color: '#7A877F', fontSize: 14, marginTop: 8, textAlign: 'center' },
+  loading: { marginTop: 24 },
+  secondaryButton: {
     alignItems: 'center',
+    backgroundColor: '#F1F5F2',
+    borderRadius: 12,
+    marginTop: 24,
+    padding: 15,
+  },
+  secondaryText: { color: '#23644F', fontSize: 15, fontWeight: '600' },
+  actionButton: {
+    alignItems: 'center',
+    backgroundColor: '#168A57',
+    borderRadius: 14,
+    marginTop: 16,
+    padding: 18,
   },
   stopButton: { backgroundColor: '#B42318' },
   disabled: { opacity: 0.6 },
-  actionText: { fontSize: 18, fontWeight: '600', color: '#FFFFFF' },
-  transportButton: {
-    marginBottom: 16,
-    padding: 16,
-    borderRadius: 12,
-    backgroundColor: '#F2F2F2',
-    alignItems: 'center',
-  },
-  transportText: { fontSize: 16, color: '#1A1A1A' },
+  actionText: { color: '#FFFFFF', fontSize: 17, fontWeight: '600' },
 });

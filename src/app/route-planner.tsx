@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -10,31 +10,125 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import * as Location from 'expo-location';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import RouteMap from '@components/RouteMap';
+import BottomNav from '@components/BottomNav';
+import RouteOptionCard from '@components/RouteOptionCard';
+import { SQLiteDB } from '@services/database';
 import WalkIcon from '@assets/icons/walk.svg';
-import AirIcon from '@assets/icons/air.svg';
-import NoiseIcon from '@assets/icons/noise.svg';
 import {
+  getCurrentRouteCandidates,
   getRouteRecommendations,
+  parseRouteCandidate,
   type Coordinate,
   type RouteCandidate,
-} from '@services/routeQuality';
+} from '@services/routeService';
 import { recommendRouteIndex } from '@services/routeRecommendation';
+import { getCityConditions, type CityConditions } from '@services/cityConditions';
 import { recordDiagnostic } from '@services/diagnostics';
+import { getSelectedRouteId, setSelectedRouteId } from '@services/screenState';
 
 const OWN_LOCATION = 'Мое местоположение';
 
 export default function RoutePlannerScreen() {
   const router = useRouter();
-  const [origin, setOrigin] = useState(OWN_LOCATION);
-  const [destination, setDestination] = useState('');
+  const params = useLocalSearchParams<{
+    originLat?: string | string[];
+    originLon?: string | string[];
+    destinationLat?: string | string[];
+    destinationLon?: string | string[];
+    context?: string | string[];
+  }>();
+  const requestId = useRef(0);
+  const firstParam = (value: string | string[] | undefined) =>
+    Array.isArray(value) ? value[0] : value;
+  const originLat = firstParam(params.originLat);
+  const originLon = firstParam(params.originLon);
+  const destinationLat = firstParam(params.destinationLat);
+  const destinationLon = firstParam(params.destinationLon);
+  const context = firstParam(params.context);
+  const historyStart =
+    originLat !== undefined &&
+    originLon !== undefined &&
+    destinationLat !== undefined &&
+    destinationLon !== undefined &&
+    context !== 'recalculated';
+  const coordinateEndpoints =
+    originLat !== undefined &&
+    originLon !== undefined &&
+    destinationLat !== undefined &&
+    destinationLon !== undefined;
+  const [useHistoryEndpoints, setUseHistoryEndpoints] = useState(historyStart);
+  const [origin, setOrigin] = useState(
+    historyStart
+      ? 'Начало прогулки'
+      : context === 'recalculated'
+        ? 'Мое местоположение'
+        : OWN_LOCATION
+  );
+  const [destination, setDestination] = useState(
+    coordinateEndpoints ? (historyStart ? 'Конец прогулки' : 'Пункт назначения') : ''
+  );
+  const [useCoordinateEndpoints, setUseCoordinateEndpoints] = useState(coordinateEndpoints);
   const [locationDisclosureAccepted, setLocationDisclosureAccepted] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [candidates, setCandidates] = useState<RouteCandidate[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [recommendedId, setRecommendedId] = useState<string | null>(null);
+  const [conditionsLoading, setConditionsLoading] = useState(false);
+  const [candidates, setCandidates] = useState<RouteCandidate[]>(getCurrentRouteCandidates);
+  const [savedRoutes, setSavedRoutes] = useState<RouteCandidate[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(getSelectedRouteId);
+  const [recommendedId, setRecommendedId] = useState<string | null>(() => {
+    const currentCandidates = getCurrentRouteCandidates();
+    return currentCandidates[recommendRouteIndex(currentCandidates)]?.id ?? null;
+  });
+  const [cityConditions, setCityConditions] = useState<CityConditions | null>(null);
+
+  useEffect(
+    () => () => {
+      requestId.current += 1;
+    },
+    []
+  );
+
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+      SQLiteDB.getRouteBookmarks()
+        .then(bookmarks => {
+          const routes: RouteCandidate[] = [];
+          let invalidCount = 0;
+          for (const bookmark of bookmarks) {
+            try {
+              routes.push(parseRouteCandidate(bookmark.routeData, bookmark.id));
+            } catch (error) {
+              invalidCount += 1;
+              console.error('Could not read a saved route:', error);
+              void recordDiagnostic('warning', 'A saved route could not be read');
+            }
+          }
+          if (active) {
+            setSavedRoutes(routes);
+            if (invalidCount > 0) {
+              Alert.alert(
+                'Некоторые маршруты недоступны',
+                'Повреждённые сохранённые маршруты не показаны.'
+              );
+            }
+          }
+        })
+        .catch(error => {
+          console.error('Could not load locally saved routes:', error);
+          void recordDiagnostic('error', 'Could not load saved routes in planner');
+          if (active) {
+            Alert.alert('Ошибка', 'Не удалось загрузить сохранённые маршруты.');
+          }
+        });
+      return () => {
+        active = false;
+      };
+    }, [])
+  );
 
   const selected = useMemo(
     () => candidates.find(candidate => candidate.id === selectedId) ?? null,
@@ -43,6 +137,11 @@ export default function RoutePlannerScreen() {
   const fastestDuration = candidates.length
     ? Math.min(...candidates.map(candidate => candidate.durationMinutes))
     : 0;
+
+  function selectRoute(id: string | null) {
+    setSelectedId(id);
+    setSelectedRouteId(id);
+  }
 
   async function resolveAddress(value: string, useCurrentLocation: boolean): Promise<Coordinate> {
     if (useCurrentLocation) {
@@ -77,27 +176,61 @@ export default function RoutePlannerScreen() {
     if (!locationDisclosureAccepted) {
       Alert.alert(
         'Подтвердите передачу координат',
-        'Для поиска и оценки маршрута точка начала и пункт назначения будут переданы сервисам маршрутизации и экологических данных.'
+        'Точные координаты начала и конца передаются Valhalla для построения маршрута. Open-Meteo получает только округлённые координаты района для общей оценки воздуха и погоды. История перемещений не передаётся.'
       );
       return;
     }
 
+    const currentRequestId = ++requestId.current;
     setLoading(true);
+    setConditionsLoading(false);
+    setCityConditions(null);
     setCandidates([]);
-    setSelectedId(null);
+    selectRoute(null);
     setRecommendedId(null);
     try {
-      const [start, end] = await Promise.all([
-        resolveAddress(origin, origin.trim().toLocaleLowerCase('ru-RU') === OWN_LOCATION.toLocaleLowerCase('ru-RU')),
-        resolveAddress(destination, false),
-      ]);
+      const startAndEnd = useCoordinateEndpoints
+        ? [
+            {
+              latitude: Number(originLat),
+              longitude: Number(originLon),
+            },
+            {
+              latitude: Number(destinationLat),
+              longitude: Number(destinationLon),
+            },
+          ] as const
+        : await Promise.all([
+            resolveAddress(
+              origin,
+              origin.trim().toLocaleLowerCase('ru-RU') ===
+                OWN_LOCATION.toLocaleLowerCase('ru-RU')
+            ),
+            resolveAddress(destination, false),
+          ]);
+      const [start, end] = startAndEnd;
       const results = await getRouteRecommendations(start, end);
+      if (currentRequestId !== requestId.current) return;
       setCandidates(results);
-      const recommendedIndex = recommendRouteIndex(results);
-      const recommended = results[recommendedIndex] ?? null;
+      const recommended = results[recommendRouteIndex(results)] ?? null;
       setRecommendedId(recommended?.id ?? null);
-      setSelectedId(recommended?.id ?? null);
+      selectRoute(recommended?.id ?? null);
+      if (recommended) {
+        setConditionsLoading(true);
+        getCityConditions(start)
+          .then(value => {
+            if (currentRequestId === requestId.current) setCityConditions(value);
+          })
+          .catch(error => {
+            console.warn('City-level conditions unavailable for route search:', error);
+            void recordDiagnostic('warning', 'City-level conditions unavailable for route search');
+          })
+          .finally(() => {
+            if (currentRequestId === requestId.current) setConditionsLoading(false);
+          });
+      }
     } catch (error) {
+      if (currentRequestId !== requestId.current) return;
       console.error('Could not generate route recommendations:', error);
       await recordDiagnostic('error', 'Route recommendation request failed');
       Alert.alert(
@@ -105,28 +238,47 @@ export default function RoutePlannerScreen() {
         error instanceof Error ? error.message : 'Проверьте адреса и подключение к интернету.'
       );
     } finally {
-      setLoading(false);
+      if (currentRequestId === requestId.current) setLoading(false);
     }
   }
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
       <StatusBar barStyle="dark-content" />
-      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-        <TouchableOpacity accessibilityRole="button" onPress={() => router.back()}>
-          <Text style={styles.back}>← Назад</Text>
-        </TouchableOpacity>
+      <ScrollView
+        contentContainerStyle={styles.content}
+        keyboardShouldPersistTaps="handled"
+      >
         <View style={styles.titleRow}>
-          <WalkIcon width={28} height={28} color="#168A57" />
-          <Text style={styles.title}>Чистый маршрут</Text>
+          <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityLabel="Назад"
+            onPress={() => router.back()}
+            style={styles.backButton}
+          >
+            <Text style={styles.back}>‹</Text>
+          </TouchableOpacity>
+          <View style={styles.heading}>
+            <Text style={styles.title}>Как приятнее дойти</Text>
+            <Text style={styles.headingSubtitle}>
+              {useHistoryEndpoints
+                ? 'Участок из вашей истории'
+                : context === 'recalculated'
+                  ? 'Новый маршрут от вашего места'
+                  : 'Пешком · выберите точки'}
+            </Text>
+          </View>
+          <WalkIcon width={22} height={22} color="#23644F" />
         </View>
         <Text style={styles.subtitle}>
-          Сравним варианты пешего маршрута по времени, расчетному качеству воздуха и приблизительной близости к крупным дорогам.
+          Реальные варианты пешеходных маршрутов. Данные о шуме и качестве воздуха вдоль улиц пока недоступны.
         </Text>
+
         <Text style={styles.label}>Откуда</Text>
         <TextInput
           accessibilityLabel="Начальная точка"
           value={origin}
+          editable={!useHistoryEndpoints}
           onChangeText={setOrigin}
           placeholder="Адрес или «Мое местоположение»"
           style={styles.input}
@@ -135,10 +287,27 @@ export default function RoutePlannerScreen() {
         <TextInput
           accessibilityLabel="Пункт назначения"
           value={destination}
+          editable={!useHistoryEndpoints}
           onChangeText={setDestination}
           placeholder="Адрес или название места"
           style={styles.input}
         />
+        {useHistoryEndpoints && (
+          <TouchableOpacity
+            accessibilityRole="button"
+            onPress={() => {
+              setUseHistoryEndpoints(false);
+              setUseCoordinateEndpoints(false);
+              setOrigin(OWN_LOCATION);
+              setDestination('');
+              setCandidates([]);
+              selectRoute(null);
+            }}
+            style={styles.changeEndpoints}
+          >
+            <Text style={styles.changeEndpointsText}>Изменить точки вручную</Text>
+          </TouchableOpacity>
+        )}
 
         <TouchableOpacity
           accessibilityRole="checkbox"
@@ -150,7 +319,7 @@ export default function RoutePlannerScreen() {
             {locationDisclosureAccepted && <Text style={styles.checkmark}>✓</Text>}
           </View>
           <Text style={styles.consentText}>
-          Разрешаю передать адреса системному геокодеру устройства, а координаты — Valhalla, Open-Meteo и OpenStreetMap Overpass для расчета маршрута и оценки среды. OpenFreeMap также получает запросы тайлов для видимой области карты.
+            Разрешаю передать адрес системному геокодеру, координаты Valhalla для построения и округлённые координаты Open-Meteo для данных о городе. OpenFreeMap получает запросы тайлов видимой карты. Персональная история остаётся на устройстве.
           </Text>
         </TouchableOpacity>
 
@@ -158,7 +327,7 @@ export default function RoutePlannerScreen() {
           accessibilityRole="button"
           disabled={loading}
           style={[styles.primaryButton, loading && styles.disabled]}
-          onPress={findRoutes}
+          onPress={() => void findRoutes()}
         >
           {loading ? (
             <ActivityIndicator color="#FFFFFF" />
@@ -167,138 +336,172 @@ export default function RoutePlannerScreen() {
           )}
         </TouchableOpacity>
 
-        {selected && selected.coordinates.length > 1 && (
+        {cityConditions && (
+          <View style={styles.conditionsCard}>
+            <Text style={styles.conditionsTitle}>Общие условия в районе начала маршрута</Text>
+            <Text style={styles.conditionsValue}>
+              PM₂.₅: {cityConditions.pm25.value === null ? 'нет данных' : `${cityConditions.pm25.value.toFixed(1)} мкг/м³`}
+              {'  ·  '}
+              Погода: {cityConditions.temperature.value === null ? 'нет данных' : `${Math.round(cityConditions.temperature.value)} °C`}
+            </Text>
+            <Text style={styles.conditionsSource}>
+              {cityConditions.pm25.source}
+              {cityConditions.pm25.updatedAt
+                ? ` · обновлено ${cityConditions.pm25.updatedAt.toLocaleTimeString('ru-RU', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })}`
+                : ''}
+              {cityConditions.pm25.stale ? ' · устаревшие данные' : ''}
+            </Text>
+            <Text style={styles.conditionsSource}>
+              Пробки: {cityConditions.traffic.source}. Общие условия не ранжируют улицы.
+            </Text>
+          </View>
+        )}
+        {conditionsLoading && !cityConditions && (
+          <View style={styles.conditionsLoading}>
+            <ActivityIndicator size="small" color="#23644F" />
+            <Text style={styles.conditionsSource}>Загружаем общие данные по району…</Text>
+          </View>
+        )}
+
+        {candidates.length > 0 && (
           <RouteMap
-            key={selected.id}
+            key={candidates.map(candidate => candidate.id).join('-')}
             style={styles.map}
-            coordinates={selected.coordinates}
+            coordinates={selected?.coordinates ?? candidates[0].coordinates}
+            alternativeRoutes={candidates.map(candidate => ({
+              id: candidate.id,
+              coordinates: candidate.coordinates,
+              color: candidate.id === selectedId ? '#23644F' : '#87938B',
+            }))}
           />
         )}
 
-        {candidates.map((candidate, index) => (
-          <TouchableOpacity
-            key={candidate.id}
-            accessibilityRole="button"
-            accessibilityState={{ selected: selectedId === candidate.id }}
-            style={[
-              styles.card,
-              selectedId === candidate.id && styles.selectedCard,
-            ]}
-            onPress={() => setSelectedId(candidate.id)}
-          >
-            <View style={styles.cardHeader}>
-              <Text style={styles.cardTitle}>
-                {candidate.id === recommendedId
-                  ? 'Рекомендуем'
-                  : `Вариант ${index + 1}`}
-              </Text>
-              <Text style={styles.score}>
-                {candidate.qualityScore === null
-                  ? 'Нет оценки'
-                  : `${Math.round(candidate.qualityScore)}/100`}
-              </Text>
-            </View>
-            <Text style={styles.routeStats}>
-              {candidate.distanceKm.toFixed(1)} км · {Math.round(candidate.durationMinutes)} мин
-              {candidate.durationMinutes > fastestDuration
-                ? ` · +${Math.round(candidate.durationMinutes - fastestDuration)} мин к быстрому`
-                : ''}
+        {candidates.length > 0 && (
+          <View style={styles.resultsHeading}>
+            <Text style={styles.resultsTitle}>Варианты пути</Text>
+            <Text style={styles.resultsCount}>
+              {candidates.length} {candidates.length === 1 ? 'вариант' : 'варианта'}
             </Text>
-            <View style={styles.environmentRow}>
-              <AirIcon width={18} height={18} color="#537A68" />
-              <Text style={styles.environmentText}>
-                PM2.5: {candidate.pm25 === null ? 'нет данных' : `${candidate.pm25.toFixed(1)} мкг/м³ (модель)`}
-              </Text>
-            </View>
-            <View style={styles.environmentRow}>
-              <NoiseIcon width={18} height={18} color="#537A68" />
-              <Text style={styles.environmentText}>
-                Шум: прокси по близости к крупным дорогам, не dB
-                {candidate.majorRoadExposure === null
-                  ? ' · нет данных'
-                  : ` · экспозиция ${Math.round(candidate.majorRoadExposure * 100)}%`}
-              </Text>
-            </View>
-            {candidate.greenSpaceScore !== null && (
-              <Text style={styles.greenText}>
-                Парки поблизости (OSM): {Math.round(candidate.greenSpaceScore * 100)}% выборки
-              </Text>
-            )}
-            <Text style={styles.source}>{candidate.scoreSource}</Text>
-          </TouchableOpacity>
+          </View>
+        )}
+        {candidates.map(candidate => (
+          <RouteOptionCard
+            key={candidate.id}
+            candidate={candidate}
+            fastestDuration={fastestDuration}
+            selected={selectedId === candidate.id}
+            onSelect={() => selectRoute(candidate.id)}
+            onOpen={() => router.push(`/route/${candidate.id}`)}
+          />
         ))}
+        {savedRoutes.length > 0 && (
+          <View style={styles.savedRoutes}>
+            <Text style={styles.resultsTitle}>Сохранённые маршруты</Text>
+            {savedRoutes.map(candidate => (
+              <RouteOptionCard
+                key={`saved-${candidate.id}`}
+                candidate={candidate}
+                fastestDuration={candidate.durationMinutes}
+                selected={false}
+                onSelect={() => router.push(`/route/${candidate.id}`)}
+                onOpen={() => router.push(`/route/${candidate.id}`)}
+              />
+            ))}
+          </View>
+        )}
+
+        {selected && (
+          <Text style={styles.disclaimer}>
+            Маршрут построен Valhalla по текущей дорожной сети. Доступность пути и условия на улице могут измениться.
+          </Text>
+        )}
         <Text style={styles.disclaimer}>
-          Данные и рейтинги приблизительные, могут быть устаревшими или отсутствовать. Это не измерение загрязнения на улице, уровня шума в dB или медицинская рекомендация. Публичные сервисы предназначены для прототипа и могут ограничивать запросы.
+          Маршруты предоставляются публичным Valhalla без гарантии доступности. Погодные и воздушные показатели Open-Meteo — городская модельная оценка, а не измерения на маршруте или медицинская рекомендация.
         </Text>
       </ScrollView>
-    </View>
+      <BottomNav active="routes" />
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#FFFFFF' },
-  content: { padding: 18, paddingBottom: 36 },
-  back: { color: '#168A57', fontSize: 16, marginBottom: 16 },
-  titleRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  title: { fontSize: 27, fontWeight: '700', color: '#1A1A1A' },
-  subtitle: { color: '#5D665F', lineHeight: 21, marginTop: 10, marginBottom: 20 },
-  keyWarning: {
-    color: '#7A4B00',
-    backgroundColor: '#FFF6E5',
-    borderRadius: 8,
-    padding: 10,
-    lineHeight: 18,
-    marginBottom: 14,
+  content: { paddingHorizontal: 22, paddingTop: 8, paddingBottom: 22 },
+  back: { color: '#26362C', fontSize: 31, lineHeight: 34 },
+  backButton: {
+    width: 38,
+    height: 44,
+    alignItems: 'flex-start',
+    justifyContent: 'center',
   },
-  label: { color: '#34433A', fontSize: 14, fontWeight: '600', marginBottom: 6 },
+  titleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  heading: { flex: 1 },
+  title: { flexShrink: 1, color: '#202D26', fontSize: 21, fontWeight: '500' },
+  headingSubtitle: { color: '#7A877F', fontSize: 12, marginTop: 2 },
+  subtitle: { color: '#68766D', fontSize: 13, lineHeight: 19, marginTop: 9, marginBottom: 15 },
+  label: { color: '#34433A', fontSize: 13, fontWeight: '600', marginBottom: 6 },
   input: {
     minHeight: 48,
     borderWidth: 1,
-    borderColor: '#CCD8D0',
-    borderRadius: 10,
+    borderColor: '#D5DED7',
+    borderRadius: 12,
     paddingHorizontal: 12,
-    marginBottom: 14,
-    color: '#1A1A1A',
+    marginBottom: 12,
+    color: '#25342B',
   },
-  consent: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, marginVertical: 8 },
+  changeEndpoints: { alignSelf: 'flex-start', paddingVertical: 4, marginTop: -7 },
+  changeEndpointsText: { color: '#23644F', fontSize: 12, fontWeight: '600' },
+  consent: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, marginVertical: 5 },
   checkbox: {
-    width: 22,
-    height: 22,
+    width: 21,
+    height: 21,
     borderWidth: 1,
     borderColor: '#87968B',
     borderRadius: 5,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  checkboxChecked: { backgroundColor: '#168A57', borderColor: '#168A57' },
+  checkboxChecked: { backgroundColor: '#23644F', borderColor: '#23644F' },
   checkmark: { color: '#FFFFFF', fontWeight: '700' },
-  consentText: { flex: 1, color: '#46534A', fontSize: 13, lineHeight: 19 },
+  consentText: { flex: 1, color: '#69766E', fontSize: 11, lineHeight: 16 },
   primaryButton: {
-    backgroundColor: '#168A57',
     minHeight: 50,
     borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
-    marginVertical: 14,
+    backgroundColor: '#23644F',
+    marginTop: 13,
+    marginBottom: 14,
   },
-  primaryButtonText: { color: '#FFFFFF', fontSize: 16, fontWeight: '700' },
+  primaryButtonText: { color: '#FFFFFF', fontSize: 15, fontWeight: '600' },
   disabled: { opacity: 0.6 },
-  map: { height: 270, borderRadius: 12, marginBottom: 14 },
-  card: {
-    borderWidth: 1,
-    borderColor: '#E1E7E3',
-    borderRadius: 12,
-    padding: 14,
+  conditionsCard: {
+    borderRadius: 13,
+    backgroundColor: '#F1F5F2',
+    padding: 13,
+    marginBottom: 13,
+  },
+  conditionsTitle: { color: '#34473B', fontSize: 12, fontWeight: '600' },
+  conditionsValue: { color: '#314138', fontSize: 12, lineHeight: 18, marginTop: 6 },
+  conditionsSource: { color: '#7A877F', fontSize: 10, lineHeight: 15, marginTop: 5 },
+  conditionsLoading: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    padding: 10,
+  },
+  map: { height: 300, borderRadius: 18, marginTop: 4, marginBottom: 16 },
+  resultsHeading: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'space-between',
     marginBottom: 10,
   },
-  selectedCard: { borderColor: '#168A57', backgroundColor: '#F6FBF7' },
-  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  cardTitle: { fontSize: 17, fontWeight: '700', color: '#1D2922' },
-  score: { color: '#168A57', fontWeight: '700' },
-  routeStats: { marginTop: 6, marginBottom: 10, color: '#424D46' },
-  environmentRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 7 },
-  environmentText: { flex: 1, color: '#46534A', fontSize: 13, lineHeight: 18 },
-  greenText: { color: '#537A68', marginTop: 7, fontSize: 13 },
-  source: { color: '#747E77', fontSize: 11, lineHeight: 16, marginTop: 10 },
-  disclaimer: { color: '#747E77', fontSize: 12, lineHeight: 18, marginTop: 14 },
+  resultsTitle: { color: '#26362C', fontSize: 19, fontWeight: '600' },
+  resultsCount: { color: '#728077', fontSize: 12 },
+  savedRoutes: { marginTop: 16 },
+  disclaimer: { color: '#7A877F', fontSize: 10, lineHeight: 15, marginTop: 12 },
 });

@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react';
 import {
   Alert,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
   TextInput,
   View,
   Text,
@@ -9,6 +12,7 @@ import {
 } from 'react-native';
 import * as Location from 'expo-location';
 import { useRouter } from 'expo-router';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { SQLiteDB } from '@services/database';
 import { recordDiagnostic } from '@services/diagnostics';
 
@@ -36,15 +40,15 @@ export default function Onboarding() {
     },
     {
       title: 'Маршруты с заботой о здоровье',
-      text: 'Route Guide записывает ваши перемещения и предлагает более чистые и тихие альтернативные маршруты.',
+      text: 'Route Guide сохраняет ваши перемещения на устройстве и помогает сравнить пешие маршруты. Данные о воздухе и погоде — общая модельная оценка для района, а не измерения у дороги.',
     },
     {
       title: 'Фоновая запись',
-      text: 'С вашего разрешения приложение может записывать маршрут в фоне. Запись включается и выключается вами.',
+      text: 'После разрешения геолокации автоматическая запись включается по умолчанию. Разрешение «Всегда» позволит продолжать запись при заблокированном экране; без него запись работает, пока приложение открыто.',
     },
     {
       title: 'Конфиденциальность',
-      text: 'Профиль, история и логи хранятся на устройстве в зашифрованной базе. Для отображения карты OpenFreeMap получает запросы видимых участков, а поиск маршрута передает координаты выбранным сервисам Valhalla, Open-Meteo и OpenStreetMap.',
+      text: 'Профиль, история и логи хранятся локально в зашифрованной базе. Route Guide не загружает и не продаёт вашу историю. Для карты, построения маршрута и Open-Meteo необходимые запросы получают сторонние поставщики и применяют свои правила обработки; для воздуха и погоды отправляются округлённые координаты района.',
     },
   ];
 
@@ -71,8 +75,8 @@ export default function Onboarding() {
       if (background.status !== 'granted') {
         await recordDiagnostic('warning', 'Background location permission was denied');
         Alert.alert(
-          'Фоновая запись недоступна',
-          'Можно продолжить без фоновой записи. Чтобы записывать маршрут при заблокированном экране, включите фоновую геолокацию в настройках устройства.'
+          'Запись в фоне отключена',
+          'Автоматическая запись включится при открытом приложении. Чтобы продолжать запись при заблокированном экране, разрешите геолокацию «Всегда» в настройках устройства.'
         );
       }
       router.replace('/');
@@ -86,8 +90,16 @@ export default function Onboarding() {
   };
 
   return (
-    <View style={styles.container}>
-      <View style={styles.content}>
+    <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
+      <KeyboardAvoidingView
+        style={styles.keyboard}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
+        <ScrollView
+          contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
+        >
+        <View style={styles.content}>
         <Text style={styles.step}>{step + 1} / {steps.length}</Text>
         <Text style={styles.title}>{steps[step].title}</Text>
         <Text style={styles.text}>{steps[step].text}</Text>
@@ -102,9 +114,9 @@ export default function Onboarding() {
             value={profileName}
           />
         )}
-      </View>
+        </View>
 
-      <View style={styles.buttons}>
+        <View style={styles.buttons}>
         {step < steps.length - 1 ? (
           <TouchableOpacity style={styles.nextButton} onPress={() => setStep(s => s + 1)}>
             <Text style={styles.buttonText}>Далее</Text>
@@ -120,8 +132,10 @@ export default function Onboarding() {
             </Text>
           </TouchableOpacity>
         )}
-      </View>
-    </View>
+        </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 }
 
@@ -129,6 +143,10 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#FFFFFF',
+  },
+  keyboard: { flex: 1 },
+  scrollContent: {
+    flexGrow: 1,
     padding: 24,
     justifyContent: 'center',
   },
@@ -141,6 +159,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   title: {
+    flexShrink: 1,
     fontSize: 28,
     fontWeight: 'bold',
     color: '#1A1A1A',
@@ -149,6 +168,7 @@ const styles = StyleSheet.create({
     lineHeight: 36,
   },
   text: {
+    flexShrink: 1,
     fontSize: 16,
     color: '#4A4A4A',
     textAlign: 'center',

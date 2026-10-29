@@ -2,6 +2,7 @@ import * as SQLite from 'expo-sqlite';
 import * as Crypto from 'expo-crypto';
 import * as SecureStore from 'expo-secure-store';
 import type * as Location from 'expo-location';
+import { localDayBounds, getLocalDateKey } from './dayTimeline';
 import { classifyTransport } from './transportClassifier';
 
 export type RoutePoint = {
@@ -13,6 +14,7 @@ export type RoutePoint = {
   accuracy: number;
   speed: number;
   heading: number;
+  transportModeOverride?: string | null;
 };
 
 export type Route = {
@@ -38,6 +40,20 @@ export type DiagnosticLog = {
   message: string;
 };
 
+export type DayPlace = {
+  id: string;
+  title: string;
+  timestamp: Date;
+  latitude: number;
+  longitude: number;
+};
+
+export type LocalDaySnapshot = {
+  dateKey: string;
+  points: RoutePoint[];
+  places: DayPlace[];
+};
+
 type RouteRow = {
   id: string;
   start_time: string;
@@ -54,12 +70,6 @@ type ProfileRow = {
   created_at: string;
 };
 
-type DiagnosticLogRow = {
-  created_at: string;
-  level: DiagnosticLog['level'];
-  message: string;
-};
-
 type PointRow = {
   id: string;
   timestamp: string;
@@ -69,6 +79,18 @@ type PointRow = {
   accuracy: number;
   speed: number;
   heading: number;
+  transport_mode_override: string | null;
+};
+
+type DiagnosticLogRow = {
+  created_at: string;
+  level: DiagnosticLog['level'];
+  message: string;
+};
+
+type ActiveRouteRow = {
+  route_id: string;
+  start_time: string;
 };
 
 class RouteDatabase {
@@ -77,49 +99,35 @@ class RouteDatabase {
   private static readonly encryptedDatabaseName = 'route_guide_encrypted.db';
   private db: SQLite.SQLiteDatabase | null = null;
   private initializing: Promise<void> | null = null;
+  private writeQueue: Promise<void> = Promise.resolve();
 
   async init(): Promise<void> {
     if (this.db) return;
     if (!this.initializing) {
       this.initializing = (async () => {
-        const key = await SecureStore.getItemAsync(
-          RouteDatabase.encryptionKeyName
-        );
+        const key = await SecureStore.getItemAsync(RouteDatabase.encryptionKeyName);
         let db: SQLite.SQLiteDatabase;
 
         if (key) {
           db = await SQLite.openDatabaseAsync(RouteDatabase.encryptedDatabaseName);
           try {
-            await db.execAsync(`PRAGMA key = "x'${key}'";`);
+            await db.execAsync(`PRAGMA key = "x'${key}';`);
             await this.verifyCipher(db);
             await db.getFirstAsync('SELECT count(*) FROM sqlite_master');
-            await this.deleteDatabaseFile(RouteDatabase.databaseName);
           } catch (error) {
             await db.closeAsync();
             throw error;
           }
         } else {
           const legacyDb = await SQLite.openDatabaseAsync(RouteDatabase.databaseName);
-          try {
-            await this.verifyCipher(legacyDb);
-          } catch (error) {
-            await legacyDb.closeAsync();
-            throw error;
-          }
           const bytes = await Crypto.getRandomBytesAsync(32);
-          const newKey = Array.from(bytes, byte =>
-            byte.toString(16).padStart(2, '0')
-          ).join('');
-
+          const newKey = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
           let legacyDbOpen = true;
           try {
+            await this.verifyCipher(legacyDb);
             await this.deleteDatabaseFile(RouteDatabase.encryptedDatabaseName);
-            const directory = legacyDb.databasePath.slice(
-              0,
-              legacyDb.databasePath.lastIndexOf('/')
-            );
-            const encryptedPath =
-              `${directory}/${RouteDatabase.encryptedDatabaseName}`.replace(/'/g, "''");
+            const directory = legacyDb.databasePath.slice(0, legacyDb.databasePath.lastIndexOf('/'));
+            const encryptedPath = `${directory}/${RouteDatabase.encryptedDatabaseName}`.replace(/'/g, "''");
             await legacyDb.execAsync(`
               ATTACH DATABASE '${encryptedPath}' AS encrypted KEY "x'${newKey}'";
               SELECT sqlcipher_export('encrypted');
@@ -127,84 +135,21 @@ class RouteDatabase {
             `);
             await legacyDb.closeAsync();
             legacyDbOpen = false;
+            db = await SQLite.openDatabaseAsync(RouteDatabase.encryptedDatabaseName);
+            await db.execAsync(`PRAGMA key = "x'${newKey}';`);
+            await this.verifyCipher(db);
+            await db.getFirstAsync('SELECT count(*) FROM sqlite_master');
+            await SecureStore.setItemAsync(RouteDatabase.encryptionKeyName, newKey);
+            await this.deleteDatabaseFile(RouteDatabase.databaseName);
           } catch (error) {
             if (legacyDbOpen) await legacyDb.closeAsync();
-            await this.deleteDatabaseFile(RouteDatabase.encryptedDatabaseName);
             throw new Error('Не удалось включить шифрование локальной базы данных.', {
               cause: error,
             });
           }
+        }
 
-          db = await SQLite.openDatabaseAsync(RouteDatabase.encryptedDatabaseName);
-          try {
-            await db.execAsync(`PRAGMA key = "x'${newKey}'";`);
-            await this.verifyCipher(db);
-            await db.getFirstAsync('SELECT count(*) FROM sqlite_master');
-            await SecureStore.setItemAsync(
-              RouteDatabase.encryptionKeyName,
-              newKey
-            );
-            await this.deleteDatabaseFile(RouteDatabase.databaseName);
-          } catch (error) {
-            await db.closeAsync();
-            throw error;
-          }
-        }
-        await db.execAsync(`
-          PRAGMA foreign_keys = ON;
-          CREATE TABLE IF NOT EXISTS routes (
-            id TEXT PRIMARY KEY NOT NULL,
-            start_time TEXT NOT NULL,
-            end_time TEXT NOT NULL,
-            distance REAL NOT NULL DEFAULT 0,
-            duration INTEGER NOT NULL DEFAULT 0,
-            transport_mode TEXT NOT NULL,
-            transport_confidence REAL,
-            mode_locked INTEGER NOT NULL DEFAULT 0
-          );
-          CREATE TABLE IF NOT EXISTS route_points (
-            id TEXT PRIMARY KEY NOT NULL,
-            route_id TEXT NOT NULL REFERENCES routes(id),
-            timestamp TEXT NOT NULL,
-            latitude REAL NOT NULL,
-            longitude REAL NOT NULL,
-            altitude REAL NOT NULL,
-            accuracy REAL NOT NULL,
-            speed REAL NOT NULL,
-            heading REAL NOT NULL
-          );
-          CREATE INDEX IF NOT EXISTS route_points_route_timestamp
-            ON route_points(route_id, timestamp);
-          CREATE TABLE IF NOT EXISTS active_tracking (
-            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-            route_id TEXT NOT NULL REFERENCES routes(id)
-          );
-          CREATE TABLE IF NOT EXISTS local_profile (
-            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-            display_name TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-          );
-          CREATE TABLE IF NOT EXISTS diagnostic_logs (
-            id TEXT PRIMARY KEY NOT NULL,
-            created_at TEXT NOT NULL,
-            level TEXT NOT NULL CHECK (level IN ('info', 'warning', 'error')),
-            message TEXT NOT NULL
-          );
-          CREATE INDEX IF NOT EXISTS diagnostic_logs_created_at
-            ON diagnostic_logs(created_at);
-        `);
-        const routeColumns = await db.getAllAsync<{ name: string }>(
-          'PRAGMA table_info(routes)'
-        );
-        if (!routeColumns.some(column => column.name === 'transport_confidence')) {
-          await db.execAsync('ALTER TABLE routes ADD COLUMN transport_confidence REAL');
-        }
-        if (!routeColumns.some(column => column.name === 'mode_locked')) {
-          await db.execAsync(
-            'ALTER TABLE routes ADD COLUMN mode_locked INTEGER NOT NULL DEFAULT 1'
-          );
-        }
+        await this.initializeSchema(db);
         this.db = db;
       })().finally(() => {
         this.initializing = null;
@@ -228,38 +173,129 @@ class RouteDatabase {
     await SQLite.deleteDatabaseAsync(name);
   }
 
+  private async initializeSchema(db: SQLite.SQLiteDatabase): Promise<void> {
+    await db.execAsync(`
+      PRAGMA foreign_keys = ON;
+      CREATE TABLE IF NOT EXISTS routes (
+        id TEXT PRIMARY KEY NOT NULL,
+        start_time TEXT NOT NULL,
+        end_time TEXT NOT NULL,
+        distance REAL NOT NULL DEFAULT 0,
+        duration INTEGER NOT NULL DEFAULT 0,
+        transport_mode TEXT NOT NULL,
+        transport_confidence REAL,
+        mode_locked INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS route_points (
+        id TEXT PRIMARY KEY NOT NULL,
+        route_id TEXT NOT NULL REFERENCES routes(id),
+        timestamp TEXT NOT NULL,
+        latitude REAL NOT NULL,
+        longitude REAL NOT NULL,
+        altitude REAL NOT NULL DEFAULT 0,
+        accuracy REAL NOT NULL DEFAULT 0,
+        speed REAL NOT NULL DEFAULT 0,
+        heading REAL NOT NULL DEFAULT 0,
+        transport_mode_override TEXT
+      );
+      CREATE INDEX IF NOT EXISTS route_points_route_timestamp
+        ON route_points(route_id, timestamp);
+      CREATE INDEX IF NOT EXISTS route_points_timestamp
+        ON route_points(timestamp);
+      CREATE INDEX IF NOT EXISTS routes_start_time
+        ON routes(start_time);
+      CREATE TABLE IF NOT EXISTS active_tracking (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        route_id TEXT NOT NULL REFERENCES routes(id)
+      );
+      CREATE TABLE IF NOT EXISTS local_profile (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        display_name TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL DEFAULT ''
+      );
+      CREATE TABLE IF NOT EXISTS diagnostic_logs (
+        id TEXT PRIMARY KEY NOT NULL,
+        created_at TEXT NOT NULL,
+        level TEXT NOT NULL CHECK (level IN ('info', 'warning', 'error')),
+        message TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS diagnostic_logs_created_at
+        ON diagnostic_logs(created_at);
+      CREATE TABLE IF NOT EXISTS day_places (
+        id TEXT PRIMARY KEY NOT NULL,
+        title TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        latitude REAL NOT NULL,
+        longitude REAL NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS day_places_created_at
+        ON day_places(created_at);
+      CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY NOT NULL,
+        value TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS route_bookmarks (
+        id TEXT PRIMARY KEY NOT NULL,
+        route_data TEXT NOT NULL,
+        saved_at TEXT NOT NULL
+      );
+    `);
+
+    await this.ensureColumn(db, 'routes', 'transport_confidence', 'REAL');
+    await this.ensureColumn(db, 'routes', 'mode_locked', 'INTEGER NOT NULL DEFAULT 1');
+    await this.ensureColumn(db, 'route_points', 'transport_mode_override', 'TEXT');
+    await this.ensureColumn(db, 'local_profile', 'created_at', "TEXT NOT NULL DEFAULT ''");
+    await this.ensureColumn(db, 'local_profile', 'updated_at', "TEXT NOT NULL DEFAULT ''");
+  }
+
+  private async ensureColumn(
+    db: SQLite.SQLiteDatabase,
+    table: string,
+    column: string,
+    declaration: string
+  ): Promise<void> {
+    const columns = await db.getAllAsync<{ name: string }>(`PRAGMA table_info(${table})`);
+    if (!columns.some(existing => existing.name === column)) {
+      await db.execAsync(`ALTER TABLE ${table} ADD COLUMN ${column} ${declaration}`);
+    }
+  }
+
   private async database(): Promise<SQLite.SQLiteDatabase> {
     if (!this.db) await this.init();
     if (!this.db) throw new Error('Route database failed to initialize');
     return this.db;
   }
 
+  private async serializeWrite<T>(operation: () => Promise<T>): Promise<T> {
+    const pending = this.writeQueue.then(operation);
+    this.writeQueue = pending.then(() => undefined, () => undefined);
+    return pending;
+  }
+
   async startRoute(transportMode: string, manual = false): Promise<string> {
     const db = await this.database();
-    const id = `route_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const now = new Date().toISOString();
-
-    await db.withTransactionAsync(async () => {
-      const active = await db.getFirstAsync<{ route_id: string }>(
-        'SELECT route_id FROM active_tracking WHERE singleton = 1'
-      );
-      if (active) {
-        throw new Error('Сначала завершите текущую запись маршрута.');
-      }
-
-      await db.runAsync(
-        `INSERT INTO routes
-         (id, start_time, end_time, transport_mode, mode_locked)
-         VALUES (?, ?, ?, ?, ?)`,
-        [id, now, now, transportMode, manual ? 1 : 0]
-      );
-      await db.runAsync(
-        'INSERT OR REPLACE INTO active_tracking (singleton, route_id) VALUES (1, ?)',
-        [id]
-      );
+    return this.serializeWrite(async () => {
+      const id = `route_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const now = new Date().toISOString();
+      await db.withTransactionAsync(async () => {
+        const active = await db.getFirstAsync<{ route_id: string }>(
+          'SELECT route_id FROM active_tracking WHERE singleton = 1'
+        );
+        if (active) throw new Error('Сначала завершите текущую запись маршрута.');
+        await db.runAsync(
+          `INSERT INTO routes
+           (id, start_time, end_time, transport_mode, mode_locked)
+           VALUES (?, ?, ?, ?, ?)`,
+          [id, now, now, transportMode, manual ? 1 : 0]
+        );
+        await db.runAsync(
+          'INSERT OR REPLACE INTO active_tracking (singleton, route_id) VALUES (1, ?)',
+          [id]
+        );
+      });
+      return id;
     });
-
-    return id;
   }
 
   async getActiveRouteId(): Promise<string | null> {
@@ -268,6 +304,19 @@ class RouteDatabase {
       'SELECT route_id FROM active_tracking WHERE singleton = 1'
     );
     return row?.route_id ?? null;
+  }
+
+  async setActiveRoute(routeId: string): Promise<void> {
+    const db = await this.database();
+    await db.runAsync(
+      'INSERT OR REPLACE INTO active_tracking (singleton, route_id) VALUES (1, ?)',
+      [routeId]
+    );
+  }
+
+  async clearActiveRoute(): Promise<void> {
+    const db = await this.database();
+    await db.runAsync('DELETE FROM active_tracking WHERE singleton = 1');
   }
 
   async getLocalProfile(): Promise<LocalProfile | null> {
@@ -285,16 +334,39 @@ class RouteDatabase {
     if (normalizedName.length < 2 || normalizedName.length > 50) {
       throw new Error('Имя профиля должно содержать от 2 до 50 символов.');
     }
-
     const db = await this.database();
     const now = new Date().toISOString();
+    const existing = await db.getFirstAsync<{ singleton: number }>(
+      'SELECT singleton FROM local_profile WHERE singleton = 1'
+    );
+    if (existing) {
+      await db.runAsync(
+        'UPDATE local_profile SET display_name = ?, updated_at = ? WHERE singleton = 1',
+        [normalizedName, now]
+      );
+    } else {
+      await db.runAsync(
+        `INSERT INTO local_profile (singleton, display_name, created_at, updated_at)
+         VALUES (1, ?, ?, ?)`,
+        [normalizedName, now, now]
+      );
+    }
+  }
+
+  async isAutomaticRecordingEnabled(): Promise<boolean> {
+    const db = await this.database();
+    const row = await db.getFirstAsync<{ value: string }>(
+      "SELECT value FROM app_settings WHERE key = 'automatic_recording'"
+    );
+    return row?.value !== 'false';
+  }
+
+  async setAutomaticRecordingEnabled(enabled: boolean): Promise<void> {
+    const db = await this.database();
     await db.runAsync(
-      `INSERT INTO local_profile (singleton, display_name, created_at, updated_at)
-       VALUES (1, ?, ?, ?)
-       ON CONFLICT(singleton) DO UPDATE SET
-         display_name = excluded.display_name,
-         updated_at = excluded.updated_at`,
-      [normalizedName, now, now]
+      `INSERT INTO app_settings (key, value) VALUES ('automatic_recording', ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      [String(enabled)]
     );
   }
 
@@ -303,15 +375,28 @@ class RouteDatabase {
     message: string
   ): Promise<void> {
     const db = await this.database();
-    await db.runAsync(
-      'INSERT INTO diagnostic_logs (id, created_at, level, message) VALUES (?, ?, ?, ?)',
-      [
-        `log_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        new Date().toISOString(),
-        level,
-        message.slice(0, 500),
-      ]
+    const columns = await db.getAllAsync<{ name: string; type: string }>(
+      'PRAGMA table_info(diagnostic_logs)'
     );
+    const integerPrimaryKey = columns.some(
+      column => column.name === 'id' && column.type.toUpperCase() === 'INTEGER'
+    );
+    if (integerPrimaryKey) {
+      await db.runAsync(
+        'INSERT INTO diagnostic_logs (created_at, level, message) VALUES (?, ?, ?)',
+        [new Date().toISOString(), level, message.slice(0, 500)]
+      );
+    } else {
+      await db.runAsync(
+        'INSERT INTO diagnostic_logs (id, created_at, level, message) VALUES (?, ?, ?, ?)',
+        [
+          `log_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          new Date().toISOString(),
+          level,
+          message.slice(0, 500),
+        ]
+      );
+    }
     await db.runAsync(
       `DELETE FROM diagnostic_logs
        WHERE id NOT IN (
@@ -338,122 +423,121 @@ class RouteDatabase {
   }
 
   async appendLocations(locations: Location.LocationObject[]): Promise<void> {
+    if (!locations.length) return;
     const db = await this.database();
-    const active = await db.getFirstAsync<{ route_id: string; start_time: string }>(
-      `SELECT a.route_id, r.start_time
-       FROM active_tracking a JOIN routes r ON r.id = a.route_id
-       WHERE a.singleton = 1`
-    );
-    if (!active) return;
-
-    await db.withTransactionAsync(async () => {
-      for (const location of locations) {
-        const { latitude, longitude, altitude, accuracy, speed, heading } = location.coords;
-        if (
-          !Number.isFinite(latitude) ||
-          !Number.isFinite(longitude) ||
-          latitude < -90 ||
-          latitude > 90 ||
-          longitude < -180 ||
-          longitude > 180 ||
-          (accuracy !== null && accuracy > 100)
-        ) {
-          continue;
-        }
-
-        const timestamp = new Date(location.timestamp).toISOString();
-        const previous = await db.getFirstAsync<{ latitude: number; longitude: number }>(
-          'SELECT latitude, longitude FROM route_points WHERE route_id = ? ORDER BY timestamp DESC LIMIT 1',
-          [active.route_id]
-        );
-        const distance = previous
-          ? this.distanceInKm(
-              previous.latitude,
-              previous.longitude,
-              latitude,
-              longitude
-            )
-          : 0;
-        const pointId = `${active.route_id}_${location.timestamp}_${Math.random().toString(36).slice(2, 8)}`;
-
-        await db.runAsync(
-          `INSERT INTO route_points
-           (id, route_id, timestamp, latitude, longitude, altitude, accuracy, speed, heading)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            pointId,
-            active.route_id,
-            timestamp,
-            latitude,
-            longitude,
-            altitude ?? 0,
-            accuracy ?? 0,
-            speed ?? 0,
-            heading ?? 0,
-          ]
-        );
-
-        await db.runAsync(
-          `UPDATE routes
-           SET distance = distance + ?, end_time = ?, duration = ?
-           WHERE id = ?`,
-          [
-            distance,
-            timestamp,
-            Math.max(0, Math.floor((location.timestamp - Date.parse(active.start_time)) / 1000)),
-            active.route_id,
-          ]
-        );
-      }
-    });
-
-    const route = await db.getFirstAsync<{ mode_locked: number }>(
-      'SELECT mode_locked FROM routes WHERE id = ?',
-      [active.route_id]
-    );
-    if (route?.mode_locked) return;
-
-    const recent = await db.getAllAsync<{
-      timestamp: string;
-      latitude: number;
-      longitude: number;
-      accuracy: number;
-      speed: number;
-    }>(
-      `SELECT timestamp, latitude, longitude, accuracy, speed
-       FROM route_points WHERE route_id = ?
-       ORDER BY timestamp DESC LIMIT 7`,
-      [active.route_id]
-    );
-    const ordered = recent.reverse();
-    const observations = ordered.map((point, index) => {
-      let speed = point.speed;
-      if (speed <= 0 && index > 0) {
-        const previous = ordered[index - 1];
-        const seconds =
-          (Date.parse(point.timestamp) - Date.parse(previous.timestamp)) / 1000;
-        if (seconds > 0) {
-          speed =
-            (this.distanceInKm(
-              previous.latitude,
-              previous.longitude,
-              point.latitude,
-              point.longitude
-            ) *
-              1000) /
-            seconds;
-        }
-      }
-      return { speedMetersPerSecond: speed, accuracyMeters: point.accuracy };
-    });
-    const classification = classifyTransport(observations);
-    if (classification) {
-      await db.runAsync(
-        `UPDATE routes SET transport_mode = ?, transport_confidence = ?
-         WHERE id = ? AND mode_locked = 0`,
-        [classification.mode, classification.confidence, active.route_id]
+    await this.serializeWrite(async () => {
+      const active = await db.getFirstAsync<ActiveRouteRow>(
+        `SELECT a.route_id, r.start_time
+         FROM active_tracking a JOIN routes r ON r.id = a.route_id
+         WHERE a.singleton = 1`
       );
-    }
+      if (!active) return;
+      await db.withTransactionAsync(async () => {
+        for (const location of [...locations].sort((a, b) => a.timestamp - b.timestamp)) {
+          const { latitude, longitude, altitude, accuracy, speed, heading } = location.coords;
+          if (
+            !Number.isFinite(location.timestamp) ||
+            !Number.isFinite(latitude) ||
+            !Number.isFinite(longitude) ||
+            latitude < -90 ||
+            latitude > 90 ||
+            longitude < -180 ||
+            longitude > 180 ||
+            (accuracy !== null && accuracy > 100)
+          ) {
+            continue;
+          }
+          const timestamp = new Date(location.timestamp).toISOString();
+          const previous = await db.getFirstAsync<{
+            latitude: number;
+            longitude: number;
+            timestamp: string;
+          }>(
+            `SELECT latitude, longitude, timestamp FROM route_points
+             WHERE route_id = ? ORDER BY timestamp DESC LIMIT 1`,
+            [active.route_id]
+          );
+          if (previous && Date.parse(previous.timestamp) >= location.timestamp) continue;
+
+          const distance = previous
+            ? this.distanceInKm(previous.latitude, previous.longitude, latitude, longitude)
+            : 0;
+          const pointId = `${active.route_id}_${location.timestamp}`;
+          await db.runAsync(
+            `INSERT OR IGNORE INTO route_points
+             (id, route_id, timestamp, latitude, longitude, altitude, accuracy, speed, heading)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              pointId,
+              active.route_id,
+              timestamp,
+              latitude,
+              longitude,
+              altitude ?? 0,
+              accuracy ?? 0,
+              speed ?? 0,
+              heading ?? 0,
+            ]
+          );
+          await db.runAsync(
+            `UPDATE routes
+             SET distance = distance + ?, end_time = ?, duration = ?
+             WHERE id = ?`,
+            [
+              distance,
+              timestamp,
+              Math.max(0, Math.floor((location.timestamp - Date.parse(active.start_time)) / 1000)),
+              active.route_id,
+            ]
+          );
+        }
+      });
+
+      const route = await db.getFirstAsync<{ mode_locked: number }>(
+        'SELECT mode_locked FROM routes WHERE id = ?',
+        [active.route_id]
+      );
+      if (route?.mode_locked) return;
+      const recent = await db.getAllAsync<{
+        timestamp: string;
+        latitude: number;
+        longitude: number;
+        accuracy: number;
+        speed: number;
+      }>(
+        `SELECT timestamp, latitude, longitude, accuracy, speed
+         FROM route_points WHERE route_id = ?
+         ORDER BY timestamp DESC LIMIT 7`,
+        [active.route_id]
+      );
+      const ordered = recent.reverse();
+      const classification = classifyTransport(
+        ordered.map((point, index) => {
+          let speed = point.speed;
+          if (speed <= 0 && index > 0) {
+            const previous = ordered[index - 1];
+            const seconds = (Date.parse(point.timestamp) - Date.parse(previous.timestamp)) / 1000;
+            if (seconds > 0) {
+              speed =
+                this.distanceInKm(
+                  previous.latitude,
+                  previous.longitude,
+                  point.latitude,
+                  point.longitude
+                ) * 1000 / seconds;
+            }
+          }
+          return { speedMetersPerSecond: speed, accuracyMeters: point.accuracy };
+        })
+      );
+      if (classification) {
+        await db.runAsync(
+          `UPDATE routes SET transport_mode = ?, transport_confidence = ?
+           WHERE id = ? AND mode_locked = 0`,
+          [classification.mode, classification.confidence, active.route_id]
+        );
+      }
+    });
   }
 
   async setManualTransportMode(routeId: string, mode: string): Promise<void> {
@@ -464,30 +548,40 @@ class RouteDatabase {
     );
   }
 
+  async setTransportModeForTimeRange(
+    start: Date,
+    end: Date,
+    mode: string
+  ): Promise<void> {
+    const db = await this.database();
+    await db.runAsync(
+      `UPDATE route_points SET transport_mode_override = ?
+       WHERE timestamp >= ? AND timestamp <= ?`,
+      [mode, start.toISOString(), end.toISOString()]
+    );
+  }
+
   async finishRoute(): Promise<void> {
     const db = await this.database();
-    const active = await db.getFirstAsync<{ route_id: string; start_time: string }>(
-      `SELECT a.route_id, r.start_time
-       FROM active_tracking a JOIN routes r ON r.id = a.route_id
-       WHERE a.singleton = 1`
-    );
-    if (!active) return;
-
-    await db.withTransactionAsync(async () => {
-      await db.runAsync(
-        `UPDATE routes SET end_time = ?, duration = MAX(duration, ?)
-         WHERE id = ?`,
-        [
-          new Date().toISOString(),
-          Math.floor((Date.now() - Date.parse(active.start_time)) / 1000),
-          active.route_id,
-        ]
+    await this.serializeWrite(async () => {
+      const active = await db.getFirstAsync<ActiveRouteRow>(
+        `SELECT a.route_id, r.start_time
+         FROM active_tracking a JOIN routes r ON r.id = a.route_id
+         WHERE a.singleton = 1`
       );
-      await db.runAsync('DELETE FROM active_tracking WHERE singleton = 1');
-      await db.runAsync(
-        'DELETE FROM routes WHERE id = ? AND NOT EXISTS (SELECT 1 FROM route_points WHERE route_id = ?)',
-        [active.route_id, active.route_id]
-      );
+      if (!active) return;
+      await db.withTransactionAsync(async () => {
+        await db.runAsync(
+          `UPDATE routes SET end_time = ?, duration = MAX(duration, ?)
+           WHERE id = ?`,
+          [
+            new Date().toISOString(),
+            Math.max(0, Math.floor((Date.now() - Date.parse(active.start_time)) / 1000)),
+            active.route_id,
+          ]
+        );
+        await db.runAsync('DELETE FROM active_tracking WHERE singleton = 1');
+      });
     });
   }
 
@@ -496,16 +590,151 @@ class RouteDatabase {
     const rows = await db.getAllAsync<RouteRow>(
       'SELECT * FROM routes ORDER BY start_time DESC'
     );
-    return Promise.all(rows.map(row => this.loadRoute(db, row)));
+    return rows.map(row => this.mapRoute(row, []));
   }
 
-  async getRouteById(id: string): Promise<Route | null> {
+  async getRouteById(id: string, pointLimit?: number): Promise<Route | null> {
     const db = await this.database();
     const row = await db.getFirstAsync<RouteRow>(
       'SELECT * FROM routes WHERE id = ?',
       [id]
     );
-    return row ? this.loadRoute(db, row) : null;
+    if (!row) return null;
+    const limitSql = pointLimit ? ' LIMIT ?' : '';
+    const values: (string | number)[] = pointLimit ? [id, pointLimit] : [id];
+    const points = await db.getAllAsync<PointRow>(
+      `SELECT * FROM route_points WHERE route_id = ? ORDER BY timestamp ASC${limitSql}`,
+      values
+    );
+    return this.mapRoute(row, points);
+  }
+
+  async getLocalDaySnapshot(date: Date): Promise<LocalDaySnapshot> {
+    const db = await this.database();
+    const { start, end } = localDayBounds(date);
+    const [pointRows, placeRows] = await Promise.all([
+      db.getAllAsync<PointRow>(
+        `SELECT p.* FROM route_points p
+         JOIN routes r ON r.id = p.route_id
+         WHERE p.timestamp >= ? AND p.timestamp < ?
+         ORDER BY p.timestamp ASC`,
+        [start.toISOString(), end.toISOString()]
+      ),
+      db.getAllAsync<{
+        id: string;
+        title: string;
+        created_at: string;
+        latitude: number;
+        longitude: number;
+      }>(
+        `SELECT id, title, created_at, latitude, longitude FROM day_places
+         WHERE created_at >= ? AND created_at < ? ORDER BY created_at ASC`,
+        [start.toISOString(), end.toISOString()]
+      ),
+    ]);
+    return {
+      dateKey: getLocalDateKey(date),
+      points: pointRows.map(point => this.mapPoint(point)),
+      places: placeRows.map(place => ({
+        id: place.id,
+        title: place.title,
+        timestamp: new Date(place.created_at),
+        latitude: place.latitude,
+        longitude: place.longitude,
+      })),
+    };
+  }
+
+  async addDayPlace(
+    date: Date,
+    title: string,
+    location: { latitude: number; longitude: number }
+  ): Promise<void> {
+    const normalizedTitle = title.trim();
+    if (!normalizedTitle || normalizedTitle.length > 80) {
+      throw new Error('Название места должно содержать от 1 до 80 символов.');
+    }
+    if (
+      !Number.isFinite(location.latitude) ||
+      !Number.isFinite(location.longitude) ||
+      Math.abs(location.latitude) > 90 ||
+      Math.abs(location.longitude) > 180
+    ) {
+      throw new Error('Координаты места некорректны.');
+    }
+    const db = await this.database();
+    await db.runAsync(
+      `INSERT INTO day_places (id, title, created_at, latitude, longitude)
+       VALUES (?, ?, ?, ?, ?)`,
+      [
+        `place_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        normalizedTitle,
+        date.toISOString(),
+        location.latitude,
+        location.longitude,
+      ]
+    );
+  }
+
+  async deleteDayPlace(id: string): Promise<void> {
+    const db = await this.database();
+    await db.runAsync('DELETE FROM day_places WHERE id = ?', [id]);
+  }
+
+  async updateDayPlaceTitle(id: string, title: string): Promise<void> {
+    const normalizedTitle = title.trim();
+    if (!normalizedTitle || normalizedTitle.length > 80) {
+      throw new Error('Название места должно содержать от 1 до 80 символов.');
+    }
+    const db = await this.database();
+    const result = await db.runAsync(
+      'UPDATE day_places SET title = ? WHERE id = ?',
+      [normalizedTitle, id]
+    );
+    if (result.changes === 0) {
+      throw new Error('Это место больше не найдено в истории.');
+    }
+  }
+
+  async saveRouteBookmark(id: string, routeData: string): Promise<void> {
+    if (!id || !routeData) throw new Error('Не удалось сохранить маршрут без данных.');
+    const db = await this.database();
+    await db.runAsync(
+      `INSERT INTO route_bookmarks (id, route_data, saved_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET route_data = excluded.route_data, saved_at = excluded.saved_at`,
+      [id, routeData, new Date().toISOString()]
+    );
+  }
+
+  async getRouteBookmarks(): Promise<Array<{ id: string; routeData: string }>> {
+    const db = await this.database();
+    return db.getAllAsync<{ id: string; route_data: string }>(
+      'SELECT id, route_data FROM route_bookmarks ORDER BY saved_at DESC'
+    ).then(rows => rows.map(row => ({ id: row.id, routeData: row.route_data })));
+  }
+
+  async deleteRouteBookmark(id: string): Promise<void> {
+    const db = await this.database();
+    await db.runAsync('DELETE FROM route_bookmarks WHERE id = ?', [id]);
+  }
+
+  async getAllDayPlaces(): Promise<DayPlace[]> {
+    const db = await this.database();
+    const rows = await db.getAllAsync<{
+      id: string;
+      title: string;
+      created_at: string;
+      latitude: number;
+      longitude: number;
+    }>('SELECT id, title, created_at, latitude, longitude FROM day_places ORDER BY created_at DESC');
+    return rows.map(row => ({
+      id: row.id,
+      title: row.title,
+      timestamp: new Date(row.created_at),
+      latitude: row.latitude,
+      longitude: row.longitude,
+    }));
   }
 
   async deleteRoute(id: string): Promise<void> {
@@ -528,6 +757,8 @@ class RouteDatabase {
       await db.runAsync('DELETE FROM active_tracking');
       await db.runAsync('DELETE FROM route_points');
       await db.runAsync('DELETE FROM routes');
+      await db.runAsync('DELETE FROM day_places');
+      await db.runAsync('DELETE FROM route_bookmarks');
     });
   }
 
@@ -537,20 +768,15 @@ class RouteDatabase {
       await db.runAsync('DELETE FROM active_tracking');
       await db.runAsync('DELETE FROM route_points');
       await db.runAsync('DELETE FROM routes');
+      await db.runAsync('DELETE FROM day_places');
+      await db.runAsync('DELETE FROM route_bookmarks');
       await db.runAsync('DELETE FROM diagnostic_logs');
       await db.runAsync('DELETE FROM local_profile');
+      await db.runAsync('DELETE FROM app_settings');
     });
   }
 
-  private async loadRoute(
-    db: SQLite.SQLiteDatabase,
-    row: RouteRow
-  ): Promise<Route> {
-    const points = await db.getAllAsync<PointRow>(
-      'SELECT * FROM route_points WHERE route_id = ? ORDER BY timestamp ASC',
-      [row.id]
-    );
-
+  private mapRoute(row: RouteRow, pointRows: PointRow[]): Route {
     return {
       id: row.id,
       startTime: new Date(row.start_time),
@@ -560,16 +786,21 @@ class RouteDatabase {
       transportMode: row.transport_mode,
       transportConfidence: row.transport_confidence,
       transportModeManual: Boolean(row.mode_locked),
-      points: points.map(point => ({
-        id: point.id,
-        timestamp: new Date(point.timestamp),
-        latitude: point.latitude,
-        longitude: point.longitude,
-        altitude: point.altitude,
-        accuracy: point.accuracy,
-        speed: point.speed,
-        heading: point.heading,
-      })),
+      points: pointRows.map(point => this.mapPoint(point)),
+    };
+  }
+
+  private mapPoint(point: PointRow): RoutePoint {
+    return {
+      id: point.id,
+      timestamp: new Date(point.timestamp),
+      latitude: point.latitude,
+      longitude: point.longitude,
+      altitude: point.altitude,
+      accuracy: point.accuracy,
+      speed: point.speed,
+      heading: point.heading,
+      transportModeOverride: point.transport_mode_override,
     };
   }
 

@@ -1,22 +1,45 @@
 import { useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import type { StyleProp, ViewStyle } from 'react-native';
-import type { Feature, FeatureCollection, LineString, Point } from 'geojson';
+import type { NativeSyntheticEvent } from 'react-native';
+import type { FeatureCollection, LineString, Point } from 'geojson';
 import {
   Camera,
   GeoJSONSource,
   Layer,
   Map as NativeMap,
+  type PressEventWithFeatures,
   type InitialViewState,
 } from '@maplibre/maplibre-react-native';
 import { mapStyleUrl } from '@services/mapProvider';
 import { recordDiagnostic } from '@services/diagnostics';
-import type { Coordinate } from '@services/routeQuality';
+import type { Coordinate } from '@services/routeService';
 
 type RouteMapProps = {
   coordinates: Coordinate[];
+  routeColor?: string;
+  cameraTarget?: Coordinate | null;
+  currentLocation?: Coordinate | null;
+  visitMarkers?: Array<Coordinate & { id: string; label: string }>;
+  onVisitPress?: (visitId: string) => void;
+  alternativeRoutes?: Array<{
+    id: string;
+    coordinates: Coordinate[];
+    color: string;
+  }>;
   style?: StyleProp<ViewStyle>;
 };
+
+const maxRenderedRoutePoints = 1_200;
+
+function simplifyCoordinates(coordinates: Coordinate[]): Coordinate[] {
+  if (coordinates.length <= maxRenderedRoutePoints) return coordinates;
+
+  const stride = (coordinates.length - 1) / (maxRenderedRoutePoints - 1);
+  return Array.from({ length: maxRenderedRoutePoints }, (_, index) =>
+    coordinates[Math.round(index * stride)]
+  );
+}
 
 function routeBounds(coordinates: Coordinate[]): InitialViewState {
   if (!coordinates.length) {
@@ -53,55 +76,122 @@ function routeBounds(coordinates: Coordinate[]): InitialViewState {
   };
 }
 
-export default function RouteMap({ coordinates, style }: RouteMapProps) {
+export default function RouteMap({
+  coordinates,
+  routeColor = '#168A57',
+  cameraTarget,
+  currentLocation,
+  visitMarkers = [],
+  onVisitPress,
+  alternativeRoutes,
+  style,
+}: RouteMapProps) {
   const [mapUnavailable, setMapUnavailable] = useState(false);
   const failureLogged = useRef(false);
-  const routeFeature = useMemo<Feature<LineString> | null>(() => {
-    if (coordinates.length < 2) return null;
-    return {
-      type: 'Feature',
-      properties: {},
-      geometry: {
-        type: 'LineString',
-        coordinates: coordinates.map(point => [point.longitude, point.latitude]),
-      },
-    };
-  }, [coordinates]);
-
+  const routes = useMemo(
+    () =>
+      alternativeRoutes?.length
+        ? alternativeRoutes
+        : [{ id: 'route', coordinates, color: routeColor }],
+    [alternativeRoutes, coordinates, routeColor]
+  );
+  const routeFeatures = useMemo<FeatureCollection<LineString>>(
+    () => ({
+      type: 'FeatureCollection',
+      features: routes.flatMap(route => {
+        if (route.coordinates.length < 2) return [];
+        const renderCoordinates = simplifyCoordinates(route.coordinates);
+        return [
+          {
+            type: 'Feature' as const,
+            properties: { id: route.id, color: route.color },
+            geometry: {
+              type: 'LineString' as const,
+              coordinates: renderCoordinates.map(point => [point.longitude, point.latitude]),
+            },
+          },
+        ];
+      }),
+    }),
+    [routes]
+  );
+  const allCoordinates = useMemo(
+    () => routes.flatMap(route => route.coordinates),
+    [routes]
+  );
+  const mapCoordinates = useMemo(
+    () => [...allCoordinates, ...visitMarkers],
+    [allCoordinates, visitMarkers]
+  );
+  const camera = useMemo(
+    () => routeBounds(cameraTarget ? [cameraTarget] : mapCoordinates),
+    [cameraTarget, mapCoordinates]
+  );
   const markerFeatures = useMemo<FeatureCollection<Point>>(
     () => ({
       type: 'FeatureCollection',
-      features: coordinates.length
-        ? [
-            {
-              type: 'Feature',
-              properties: { kind: 'start' },
-              geometry: {
-                type: 'Point',
-                coordinates: [coordinates[0].longitude, coordinates[0].latitude],
+      features: [
+        ...(allCoordinates.length
+          ? [
+              {
+                type: 'Feature' as const,
+                properties: { kind: 'start', label: '' },
+                geometry: {
+                  type: 'Point' as const,
+                  coordinates: [allCoordinates[0].longitude, allCoordinates[0].latitude],
+                },
               },
-            },
-            ...(coordinates.length > 1
-              ? [
-                  {
-                    type: 'Feature' as const,
-                    properties: { kind: 'end' },
-                    geometry: {
-                      type: 'Point' as const,
-                      coordinates: [
-                        coordinates[coordinates.length - 1].longitude,
-                        coordinates[coordinates.length - 1].latitude,
-                      ],
+              ...(allCoordinates.length > 1
+                ? [
+                    {
+                      type: 'Feature' as const,
+                      properties: { kind: 'end', label: '' },
+                      geometry: {
+                        type: 'Point' as const,
+                        coordinates: [
+                          allCoordinates[allCoordinates.length - 1].longitude,
+                          allCoordinates[allCoordinates.length - 1].latitude,
+                        ],
+                      },
                     },
-                  },
-                ]
-              : []),
-          ]
-        : [],
+                  ]
+                : []),
+            ]
+          : []),
+        ...visitMarkers.map(visit => ({
+          type: 'Feature' as const,
+          properties: { kind: 'visit', label: visit.label, id: visit.id },
+          geometry: {
+            type: 'Point' as const,
+            coordinates: [visit.longitude, visit.latitude],
+          },
+        })),
+        ...(currentLocation
+          ? [
+              {
+                type: 'Feature' as const,
+                properties: { kind: 'current-location', label: '' },
+                geometry: {
+                  type: 'Point' as const,
+                  coordinates: [currentLocation.longitude, currentLocation.latitude],
+                },
+              },
+            ]
+          : []),
+      ],
     }),
-    [coordinates]
+    [allCoordinates, currentLocation, visitMarkers]
   );
-  const camera = useMemo(() => routeBounds(coordinates), [coordinates]);
+
+  function handleMarkerPress(
+    event: NativeSyntheticEvent<PressEventWithFeatures>
+  ) {
+    const visit = event.nativeEvent.features.find(
+      feature => feature.properties?.kind === 'visit'
+    );
+    const id = visit?.properties?.id;
+    if (typeof id === 'string') onVisitPress?.(id);
+  }
 
   return (
     <View style={[styles.container, style]}>
@@ -121,36 +211,63 @@ export default function RouteMap({ coordinates, style }: RouteMapProps) {
         }}
       >
         <Camera initialViewState={camera} />
-        {routeFeature && (
-          <GeoJSONSource id="route-line-source" data={routeFeature}>
+        {routeFeatures.features.length > 0 && (
+          <GeoJSONSource id="route-comparison-source" data={routeFeatures}>
             <Layer
-              id="route-line"
+              id="route-comparison-lines"
               type="line"
               paint={{
-                'line-color': '#168A57',
+                'line-color': ['get', 'color'],
                 'line-width': 5,
-                'line-opacity': 0.9,
+                'line-opacity': 0.82,
               }}
             />
           </GeoJSONSource>
         )}
         {markerFeatures.features.length > 0 && (
-          <GeoJSONSource id="route-markers-source" data={markerFeatures}>
+          <GeoJSONSource
+            id="route-markers-source"
+            data={markerFeatures}
+            onPress={onVisitPress ? handleMarkerPress : undefined}
+          >
             <Layer
               id="route-markers"
               type="circle"
               paint={{
-                'circle-radius': 7,
+                'circle-radius': [
+                  'match',
+                  ['get', 'kind'],
+                  'visit',
+                  13,
+                  'current-location',
+                  9,
+                  7,
+                ],
                 'circle-color': [
                   'match',
                   ['get', 'kind'],
+                  'visit',
+                  '#23644F',
+                  'current-location',
+                  '#23644F',
                   'start',
-                  '#168A57',
-                  '#B42318',
+                  '#23644F',
+                  '#69766E',
                 ],
                 'circle-stroke-width': 2,
                 'circle-stroke-color': '#FFFFFF',
               }}
+            />
+            <Layer
+              id="route-visit-labels"
+              type="symbol"
+              layout={{
+                'text-field': ['get', 'label'],
+                'text-size': 12,
+                'text-allow-overlap': true,
+                'text-ignore-placement': true,
+              }}
+              paint={{ 'text-color': '#FFFFFF' }}
             />
           </GeoJSONSource>
         )}

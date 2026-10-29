@@ -13,8 +13,12 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import * as Location from 'expo-location';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { SQLiteDB, type DiagnosticLog } from '@services/database';
-import { stopLocationTask } from '@services/locationService';
+import {
+  disableAutomaticRecording,
+  enableAutomaticRecording,
+} from '@services/locationService';
 import {
   clearDiagnostics,
   readDiagnostics,
@@ -25,6 +29,7 @@ export default function SettingsScreen() {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
   const [profileName, setProfileName] = useState('');
+  const [recordingEnabled, setRecordingEnabled] = useState(true);
   const [diagnosticLogs, setDiagnosticLogs] = useState<DiagnosticLog[]>([]);
 
   useEffect(() => {
@@ -33,6 +38,12 @@ export default function SettingsScreen() {
       .catch(error => {
         console.error('Could not load local profile:', error);
         void recordDiagnostic('error', 'Could not load local profile in settings');
+      });
+    SQLiteDB.isAutomaticRecordingEnabled()
+      .then(setRecordingEnabled)
+      .catch(error => {
+        console.error('Could not load automatic recording preference:', error);
+        void recordDiagnostic('error', 'Could not load automatic recording preference');
       });
     readDiagnostics()
       .then(setDiagnosticLogs)
@@ -54,6 +65,28 @@ export default function SettingsScreen() {
         'Ошибка',
         error instanceof Error ? error.message : 'Не удалось сохранить профиль.'
       );
+    }
+  }
+
+  async function toggleAutomaticRecording() {
+    setBusy(true);
+    try {
+      if (recordingEnabled) {
+        await disableAutomaticRecording();
+        setRecordingEnabled(false);
+      } else {
+        await enableAutomaticRecording();
+        setRecordingEnabled(true);
+      }
+    } catch (error) {
+      console.error('Could not update automatic recording:', error);
+      await recordDiagnostic('error', 'Could not update automatic recording');
+      Alert.alert(
+        'Ошибка записи',
+        error instanceof Error ? error.message : 'Не удалось изменить настройку записи.'
+      );
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -79,7 +112,13 @@ export default function SettingsScreen() {
           ]
         );
       } else {
-        Alert.alert('Готово', 'Фоновая геолокация разрешена. Запись включается отдельно на экране записи.');
+        if (recordingEnabled) {
+          await enableAutomaticRecording();
+        }
+        Alert.alert(
+          'Готово',
+          'Фоновая геолокация разрешена. Автоматическая запись будет продолжаться при заблокированном экране.'
+        );
       }
     } catch (error) {
       console.error('Could not request background location:', error);
@@ -92,9 +131,17 @@ export default function SettingsScreen() {
     setBusy(true);
     try {
       const routes = await SQLiteDB.getRoutes();
+      const fullRoutes = await Promise.all(
+        routes.map(route => SQLiteDB.getRouteById(route.id))
+      );
+      const places = await SQLiteDB.getAllDayPlaces();
       await Share.share({
         title: 'История Route Guide',
-        message: JSON.stringify(routes, null, 2),
+        message: JSON.stringify(
+          { routes: fullRoutes.filter(Boolean), places },
+          null,
+          2
+        ),
       });
     } catch (error) {
       console.error('Could not export route history:', error);
@@ -158,7 +205,7 @@ export default function SettingsScreen() {
         style: 'destructive',
         onPress: () => {
           setBusy(true);
-          stopLocationTask()
+          disableAutomaticRecording()
             .then(() => SQLiteDB.clearAll())
             .then(() => Alert.alert('Готово', 'История маршрутов удалена.'))
             .catch(error => {
@@ -183,7 +230,7 @@ export default function SettingsScreen() {
           style: 'destructive',
           onPress: () => {
             setBusy(true);
-            stopLocationTask()
+            disableAutomaticRecording()
               .then(() => SQLiteDB.clearAllLocalData())
               .then(() => router.replace('/onboarding'))
               .catch(error => {
@@ -198,7 +245,8 @@ export default function SettingsScreen() {
   }
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+    <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
+    <ScrollView contentContainerStyle={styles.content}>
       <StatusBar barStyle="dark-content" />
       <View style={styles.header}>
         <Text style={styles.title}>Настройки</Text>
@@ -207,7 +255,7 @@ export default function SettingsScreen() {
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Локальный профиль</Text>
         <Text style={styles.note}>
-          Профиль хранится на этом устройстве. Email, пароль, удаленный сервер и синхронизация не используются.
+          Профиль и история хранятся в зашифрованной базе на этом устройстве. Route Guide не загружает и не продаёт вашу историю. Запросы карты, маршрутизации и погоды/воздуха передают необходимую информацию соответствующим поставщикам, которые применяют собственные правила обработки.
         </Text>
         <TextInput
           accessibilityLabel="Имя локального профиля"
@@ -231,6 +279,20 @@ export default function SettingsScreen() {
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Запись и геолокация</Text>
         <TouchableOpacity
+          accessibilityRole="switch"
+          accessibilityState={{ checked: recordingEnabled }}
+          disabled={busy}
+          style={styles.row}
+          onPress={toggleAutomaticRecording}
+        >
+          <Text style={styles.rowTitle}>
+            {recordingEnabled ? 'Автоматическая запись включена' : 'Автоматическая запись выключена'}
+          </Text>
+          <Text style={styles.rowAction}>
+            {recordingEnabled ? 'Выключить' : 'Включить'}
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
           accessibilityRole="button"
           style={styles.row}
           onPress={requestBackgroundPermission}
@@ -239,7 +301,7 @@ export default function SettingsScreen() {
           <Text style={styles.rowAction}>Открыть</Text>
         </TouchableOpacity>
         <Text style={styles.note}>
-          Запись не включается автоматически. Ее можно начать и остановить на экране маршрута.
+            По умолчанию запись запускается после разрешения геолокации. Интервалы GPS увеличены для экономии энергии; ОС может приостанавливать фоновые обновления. Если разрешена геолокация только при использовании приложения, запись продолжается только пока приложение открыто.
         </Text>
       </View>
 
@@ -305,13 +367,14 @@ export default function SettingsScreen() {
         </TouchableOpacity>
       </View>
     </ScrollView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#FFFFFF' },
   content: { paddingBottom: 36 },
-  header: { paddingTop: 32, paddingHorizontal: 24, marginBottom: 24 },
+  header: { paddingTop: 16, paddingHorizontal: 24, marginBottom: 16 },
   title: { fontSize: 32, fontWeight: 'bold', color: '#1A1A1A' },
   section: { paddingHorizontal: 16, marginBottom: 24 },
   sectionTitle: { fontSize: 16, fontWeight: '600', color: '#1A1A1A', marginBottom: 12 },
@@ -324,8 +387,8 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#F2F2F2',
   },
-  rowTitle: { fontSize: 16, color: '#1A1A1A' },
-  rowAction: { color: '#168A57', fontWeight: '600' },
+  rowTitle: { flex: 1, flexShrink: 1, fontSize: 16, color: '#1A1A1A' },
+  rowAction: { flexShrink: 1, marginLeft: 12, color: '#168A57', fontWeight: '600' },
   note: { color: '#666666', fontSize: 13, lineHeight: 19, marginTop: 10 },
   input: {
     minHeight: 48,

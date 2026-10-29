@@ -25,9 +25,9 @@ module.exports = ({ config }) => {
       airQualityEndpoint:
         process.env.EXPO_PUBLIC_AIR_QUALITY_ENDPOINT ??
         'https://air-quality-api.open-meteo.com/v1/air-quality',
-      osmQueryEndpoint:
-        process.env.EXPO_PUBLIC_OSM_QUERY_ENDPOINT ??
-        'https://overpass-api.de/api/interpreter',
+      weatherEndpoint:
+        process.env.EXPO_PUBLIC_WEATHER_ENDPOINT ??
+        'https://api.open-meteo.com/v1/forecast',
     },
   };
 
