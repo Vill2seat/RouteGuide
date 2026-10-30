@@ -1,5 +1,6 @@
 import * as SQLite from 'expo-sqlite';
 import * as Crypto from 'expo-crypto';
+import * as SecureStore from 'expo-secure-store';
 import type * as Location from 'expo-location';
 import { localDayBounds, getLocalDateKey } from './dayTimeline';
 import { classifyTransport } from './transportClassifier';
@@ -104,15 +105,38 @@ class RouteDatabase {
     if (this.db) return;
     if (!this.initializing) {
       this.initializing = (async () => {
-        const db = await SQLite.openDatabaseAsync(RouteDatabase.databaseName);
-
-        await this.initializeSchema(db);
-        this.db = db;
+        const key = await this.getEncryptionKey();
+        const db = await SQLite.openDatabaseAsync(RouteDatabase.encryptedDatabaseName);
+        try {
+          await db.execAsync(`PRAGMA key = "x'${key}'"`);
+          await this.verifyCipher(db);
+          await this.migrateLegacyDatabaseIfNeeded(db);
+          await this.initializeSchema(db);
+          await this.deleteLegacyDatabaseAfterVerification(db);
+          this.db = db;
+        } catch (error) {
+          await db.closeAsync();
+          throw error;
+        }
       })().finally(() => {
         this.initializing = null;
       });
     }
     await this.initializing;
+  }
+
+  private async getEncryptionKey(): Promise<string> {
+    let key = await SecureStore.getItemAsync(RouteDatabase.encryptionKeyName);
+    if (!key) {
+      key = Array.from(await Crypto.getRandomBytesAsync(32))
+        .map(byte => byte.toString(16).padStart(2, '0'))
+        .join('');
+      await SecureStore.setItemAsync(RouteDatabase.encryptionKeyName, key);
+    }
+    if (!/^[\da-f]{64}$/i.test(key)) {
+      throw new Error('Ключ шифрования локальной базы данных некорректен.');
+    }
+    return key;
   }
 
   private async verifyCipher(db: SQLite.SQLiteDatabase): Promise<void> {
@@ -124,10 +148,85 @@ class RouteDatabase {
     }
   }
 
-  private async deleteDatabaseFile(name: string): Promise<void> {
-    const database = await SQLite.openDatabaseAsync(name);
-    await database.closeAsync();
-    await SQLite.deleteDatabaseAsync(name);
+  private async migrateLegacyDatabaseIfNeeded(
+    encryptedDatabase: SQLite.SQLiteDatabase
+  ): Promise<void> {
+    const encryptedTables = await encryptedDatabase.getFirstAsync<{ name: string }>(
+      `SELECT name FROM sqlite_master
+       WHERE type = 'table' AND name NOT LIKE 'sqlite_%' LIMIT 1`
+    );
+    if (encryptedTables) {
+      return;
+    }
+
+    const legacyDatabase = await SQLite.openDatabaseAsync(RouteDatabase.databaseName);
+    let hasLegacyTables = false;
+    try {
+      const tables = await legacyDatabase.getAllAsync<{ name: string }>(
+        `SELECT name FROM sqlite_master
+         WHERE type = 'table' AND name NOT LIKE 'sqlite_%' LIMIT 1`
+      );
+      hasLegacyTables = tables.length > 0;
+      if (hasLegacyTables) {
+        await SQLite.backupDatabaseAsync({
+          sourceDatabase: legacyDatabase,
+          destDatabase: encryptedDatabase,
+        });
+        const migratedTable = await encryptedDatabase.getFirstAsync<{ name: string }>(
+          `SELECT name FROM sqlite_master
+           WHERE type = 'table' AND name NOT LIKE 'sqlite_%' LIMIT 1`
+        );
+        if (!migratedTable) {
+          throw new Error('Не удалось проверить перенос локальной истории в зашифрованную базу.');
+        }
+      }
+    } finally {
+      await legacyDatabase.closeAsync();
+    }
+  }
+
+  private async deleteLegacyDatabaseAfterVerification(
+    encryptedDatabase: SQLite.SQLiteDatabase
+  ): Promise<void> {
+    const applicationTables = [
+      'routes',
+      'route_points',
+      'active_tracking',
+      'local_profile',
+      'diagnostic_logs',
+      'day_places',
+      'app_settings',
+      'route_bookmarks',
+    ];
+    const legacyDatabase = await SQLite.openDatabaseAsync(RouteDatabase.databaseName);
+    try {
+      const tables = await legacyDatabase.getAllAsync<{ name: string }>(
+        `SELECT name FROM sqlite_master
+         WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`
+      );
+      if (tables.some(table => !applicationTables.includes(table.name))) {
+        throw new Error('Старая база содержит неизвестные таблицы; исходные данные сохранены.');
+      }
+      for (const tableName of applicationTables) {
+        if (!tables.some(table => table.name === tableName)) continue;
+        const [legacyCount, encryptedCount] = await Promise.all([
+          legacyDatabase.getFirstAsync<{ count: number }>(
+            `SELECT COUNT(*) AS count FROM ${tableName}`
+          ),
+          encryptedDatabase.getFirstAsync<{ count: number }>(
+            `SELECT COUNT(*) AS count FROM ${tableName}`
+          ),
+        ]);
+        if (legacyCount?.count !== encryptedCount?.count) {
+          throw new Error(
+            `Проверка переноса таблицы ${tableName} не прошла; исходные данные сохранены.`
+          );
+        }
+      }
+    } finally {
+      await legacyDatabase.closeAsync();
+    }
+    await SQLite.deleteDatabaseAsync(RouteDatabase.databaseName);
   }
 
   private async initializeSchema(db: SQLite.SQLiteDatabase): Promise<void> {
@@ -383,13 +482,15 @@ class RouteDatabase {
     if (!locations.length) return;
     const db = await this.database();
     await this.serializeWrite(async () => {
-      const active = await db.getFirstAsync<ActiveRouteRow>(
-        `SELECT a.route_id, r.start_time
-         FROM active_tracking a JOIN routes r ON r.id = a.route_id
-         WHERE a.singleton = 1`
-      );
-      if (!active) return;
+      let activeRouteId: string | null = null;
       await db.withTransactionAsync(async () => {
+        const active = await db.getFirstAsync<ActiveRouteRow>(
+          `SELECT a.route_id, r.start_time
+           FROM active_tracking a JOIN routes r ON r.id = a.route_id
+           WHERE a.singleton = 1`
+        );
+        if (!active) return;
+        activeRouteId = active.route_id;
         for (const location of [...locations].sort((a, b) => a.timestamp - b.timestamp)) {
           const { latitude, longitude, altitude, accuracy, speed, heading } = location.coords;
           if (
@@ -400,7 +501,8 @@ class RouteDatabase {
             latitude > 90 ||
             longitude < -180 ||
             longitude > 180 ||
-            (accuracy !== null && accuracy > 100)
+            (accuracy !== null &&
+              (!Number.isFinite(accuracy) || accuracy < 0))
           ) {
             continue;
           }
@@ -409,16 +511,27 @@ class RouteDatabase {
             latitude: number;
             longitude: number;
             timestamp: string;
+            accuracy: number;
           }>(
-            `SELECT latitude, longitude, timestamp FROM route_points
+            `SELECT latitude, longitude, timestamp, accuracy FROM route_points
              WHERE route_id = ? ORDER BY timestamp DESC LIMIT 1`,
             [active.route_id]
           );
           if (previous && Date.parse(previous.timestamp) >= location.timestamp) continue;
 
-          const distance = previous
+          const elapsedSeconds = previous
+            ? (location.timestamp - Date.parse(previous.timestamp)) / 1000
+            : 0;
+          const accuracyMeters = accuracy ?? 1_000;
+          const distance = previous &&
+            previous.accuracy <= 100 &&
+            accuracyMeters <= 100 &&
+            elapsedSeconds > 0 &&
+            elapsedSeconds <= 10 * 60
             ? this.distanceInKm(previous.latitude, previous.longitude, latitude, longitude)
             : 0;
+          const plausibleDistance =
+            elapsedSeconds > 0 && distance * 1000 / elapsedSeconds <= 70;
           const pointId = `${active.route_id}_${Crypto.randomUUID()}`;
           await db.runAsync(
             `INSERT OR IGNORE INTO route_points
@@ -430,10 +543,10 @@ class RouteDatabase {
               timestamp,
               latitude,
               longitude,
-              altitude ?? 0,
-              accuracy ?? 0,
-              speed ?? 0,
-              heading ?? 0,
+              Number.isFinite(altitude) ? altitude : 0,
+              accuracyMeters,
+              Number.isFinite(speed) ? speed : 0,
+              Number.isFinite(heading) ? heading : 0,
             ]
           );
           await db.runAsync(
@@ -441,7 +554,7 @@ class RouteDatabase {
              SET distance = distance + ?, end_time = ?, duration = ?
              WHERE id = ?`,
             [
-              distance,
+              plausibleDistance ? distance : 0,
               timestamp,
               Math.max(0, Math.floor((location.timestamp - Date.parse(active.start_time)) / 1000)),
               active.route_id,
@@ -449,10 +562,11 @@ class RouteDatabase {
           );
         }
       });
+      if (!activeRouteId) return;
 
       const route = await db.getFirstAsync<{ mode_locked: number }>(
         'SELECT mode_locked FROM routes WHERE id = ?',
-        [active.route_id]
+        [activeRouteId]
       );
       if (route?.mode_locked) return;
       const recent = await db.getAllAsync<{
@@ -465,7 +579,7 @@ class RouteDatabase {
         `SELECT timestamp, latitude, longitude, accuracy, speed
          FROM route_points WHERE route_id = ?
          ORDER BY timestamp DESC LIMIT 7`,
-        [active.route_id]
+        [activeRouteId]
       );
       const ordered = recent.reverse();
       const classification = classifyTransport(
@@ -491,7 +605,7 @@ class RouteDatabase {
         await db.runAsync(
           `UPDATE routes SET transport_mode = ?, transport_confidence = ?
            WHERE id = ? AND mode_locked = 0`,
-          [classification.mode, classification.confidence, active.route_id]
+          [classification.mode, classification.confidence, activeRouteId]
         );
       }
     });

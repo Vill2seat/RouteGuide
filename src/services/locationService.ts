@@ -6,24 +6,45 @@ import { recordDiagnostic } from './diagnostics';
 export const locationTaskName = 'route-guide-location-task';
 
 let foregroundSubscription: Location.LocationSubscription | null = null;
-let startingLocationUpdates: Promise<void> | null = null;
+let locationLifecycle: Promise<void> = Promise.resolve();
+
+export type LocationRecordingMode = 'background' | 'foreground';
+
+function serializeLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+  const pending = locationLifecycle.then(operation);
+  locationLifecycle = pending.then(
+    () => undefined,
+    () => undefined
+  );
+  return pending;
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 if (!TaskManager.isTaskDefined(locationTaskName)) {
-  TaskManager.defineTask<{ locations: Location.LocationObject[] }>(
+  TaskManager.defineTask<{ locations?: Location.LocationObject[] }>(
     locationTaskName,
     async ({ data, error }) => {
       if (error) {
         console.error('Background location task failed:', error);
-        await recordDiagnostic('error', 'Background location task reported an error');
+        await recordDiagnostic(
+          'error',
+          `Background location task reported an error: ${describeError(error)}`
+        );
         return;
       }
-      if (!data?.locations.length) return;
+      if (!data?.locations?.length) return;
 
       try {
         await SQLiteDB.appendLocations(data.locations);
       } catch (databaseError) {
         console.error('Could not save background location updates:', databaseError);
-        await recordDiagnostic('error', 'Could not save a background location update');
+        await recordDiagnostic(
+          'error',
+          `Could not save a background location update: ${describeError(databaseError)}`
+        );
       }
     }
   );
@@ -67,7 +88,10 @@ async function startForegroundUpdates(): Promise<void> {
       location => {
         void SQLiteDB.appendLocations([location]).catch(error => {
           console.error('Could not save a foreground location update:', error);
-          void recordDiagnostic('error', 'Could not save a foreground location update');
+          void recordDiagnostic(
+            'error',
+            `Could not save a foreground location update: ${describeError(error)}`
+          );
         });
       }
     );
@@ -78,64 +102,109 @@ async function startForegroundUpdates(): Promise<void> {
   }
 }
 
-export async function startLocationTask(): Promise<void> {
-  if (startingLocationUpdates) return startingLocationUpdates;
-
-  startingLocationUpdates = (async () => {
-    const foreground = await Location.getForegroundPermissionsAsync();
-    if (foreground.status !== 'granted') {
-      throw new Error('Для записи маршрута требуется разрешение на геолокацию.');
-    }
-
-    let hasBackgroundPermission = false;
-    try {
-      hasBackgroundPermission =
-        (await Location.getBackgroundPermissionsAsync()).status === 'granted';
-    } catch (error) {
-      console.warn('Could not check background location permission:', error);
-      await recordDiagnostic('warning', 'Could not check background location permission');
-    }
-
-    if (hasBackgroundPermission) {
-      await startBackgroundTask();
-      return;
-    }
-
-    await recordDiagnostic(
-      'warning',
-      'Background location permission not granted; using foreground location updates'
-    );
-    await startForegroundUpdates();
-  })().finally(() => {
-    startingLocationUpdates = null;
-  });
-
-  return startingLocationUpdates;
+async function stopForegroundUpdates(): Promise<void> {
+  if (!foregroundSubscription) return;
+  foregroundSubscription.remove();
+  foregroundSubscription = null;
 }
 
-export async function stopLocationTask(): Promise<void> {
-  const subscription = foregroundSubscription;
-  foregroundSubscription = null;
+async function stopBackgroundUpdates(): Promise<void> {
+  const isStarted = await Location.hasStartedLocationUpdatesAsync(locationTaskName);
+  if (isStarted) {
+    await Location.stopLocationUpdatesAsync(locationTaskName);
+  }
+}
 
-  if (subscription) {
+async function stopLocationUpdates(): Promise<void> {
+  let firstError: unknown;
+  try {
+    await stopForegroundUpdates();
+  } catch (error) {
+    firstError = error;
+    console.error('Could not remove foreground location subscription:', error);
+    await recordDiagnostic(
+      'error',
+      `Could not remove foreground location subscription: ${describeError(error)}`
+    );
+  }
+
+  try {
+    await stopBackgroundUpdates();
+  } catch (error) {
+    firstError ??= error;
+    console.error('Could not stop background location updates:', error);
+    await recordDiagnostic(
+      'error',
+      `Could not stop background location updates: ${describeError(error)}`
+    );
+  }
+
+  if (firstError) throw firstError;
+}
+
+async function startLocationUpdates(): Promise<void> {
+  const foreground = await Location.getForegroundPermissionsAsync();
+  if (foreground.status !== 'granted') {
+    throw new Error('Для записи маршрута требуется разрешение на геолокацию.');
+  }
+
+  let hasBackgroundPermission = false;
+  try {
+    hasBackgroundPermission =
+      (await Location.getBackgroundPermissionsAsync()).status === 'granted';
+  } catch (error) {
+    console.warn('Could not check background location permission:', error);
+    await recordDiagnostic('warning', 'Could not check background location permission');
+  }
+
+  if (hasBackgroundPermission) {
     try {
-      subscription.remove();
-    } catch (error) {
-      console.error('Could not remove foreground location subscription:', error);
-      void recordDiagnostic('warning', 'Could not remove foreground location subscription');
+      await startBackgroundTask();
+      await stopForegroundUpdates();
+      return;
+    } catch (backgroundError) {
+      console.error(
+        'Background recording unavailable; trying foreground updates:',
+        backgroundError
+      );
+      await recordDiagnostic(
+        'warning',
+        `Background location unavailable; using foreground updates: ${describeError(backgroundError)}`
+      );
     }
   }
 
   try {
-    const isStarted =
-      await Location.hasStartedLocationUpdatesAsync(locationTaskName);
-    if (isStarted) {
-      await Location.stopLocationUpdatesAsync(locationTaskName);
-    }
+    await stopBackgroundUpdates();
   } catch (error) {
-    console.error('Could not stop background location updates:', error);
-    void recordDiagnostic('warning', 'Could not stop background location updates');
+    console.error('Could not stop background updates before foreground fallback:', error);
+    await recordDiagnostic(
+      'error',
+      `Could not stop background updates before foreground fallback: ${describeError(error)}`
+    );
+    throw error;
   }
+
+  await recordDiagnostic(
+    'warning',
+    'Background location permission not granted; using foreground location updates'
+  );
+  await startForegroundUpdates();
+}
+
+export async function startLocationTask(): Promise<void> {
+  return serializeLifecycle(startLocationUpdates);
+}
+
+export async function stopLocationTask(): Promise<void> {
+  return serializeLifecycle(stopLocationUpdates);
+}
+
+export async function getLocationRecordingMode(): Promise<LocationRecordingMode | null> {
+  return serializeLifecycle(async () => {
+    if (await Location.hasStartedLocationUpdatesAsync(locationTaskName)) return 'background';
+    return foregroundSubscription ? 'foreground' : null;
+  });
 }
 
 async function startRecordingIfNeeded(): Promise<void> {
@@ -160,7 +229,7 @@ async function startRecordingIfNeeded(): Promise<void> {
   }
 
   try {
-    await startLocationTask();
+    await startLocationUpdates();
   } catch (error) {
     if (createdRoute) {
       try {
@@ -174,56 +243,53 @@ async function startRecordingIfNeeded(): Promise<void> {
 }
 
 export async function ensureAutomaticRecording(): Promise<boolean> {
-  if (!(await SQLiteDB.isAutomaticRecordingEnabled())) return false;
-  try {
-    await startRecordingIfNeeded();
-  } catch (error) {
-    console.error('startRecordingIfNeeded failed during ensure:', error);
-    void recordDiagnostic('warning', 'startRecordingIfNeeded failed during ensure');
-    return false;
-  }
-  return true;
+  return serializeLifecycle(async () => {
+    if (!(await SQLiteDB.isAutomaticRecordingEnabled())) return false;
+    try {
+      await startRecordingIfNeeded();
+    } catch (error) {
+      console.error('startRecordingIfNeeded failed during ensure:', error);
+      await recordDiagnostic(
+        'warning',
+        `startRecordingIfNeeded failed during ensure: ${describeError(error)}`
+      );
+      return false;
+    }
+    return true;
+  });
 }
 
 export async function enableAutomaticRecording(): Promise<void> {
-  try {
-    await startRecordingIfNeeded();
-  } catch (error) {
-    console.error('startRecordingIfNeeded failed during enable:', error);
-    void recordDiagnostic('warning', 'startRecordingIfNeeded failed during enable recording');
-    throw error;
-  }
-  try {
-    await SQLiteDB.setAutomaticRecordingEnabled(true);
-  } catch (error) {
-    console.error('setAutomaticRecordingEnabled(true) failed during enable:', error);
-    void recordDiagnostic('warning', 'setAutomaticRecordingEnabled failed during enable');
-    throw error;
-  }
-  await recordDiagnostic('info', 'Automatic route recording started');
+  return serializeLifecycle(async () => {
+    try {
+      await startRecordingIfNeeded();
+      await SQLiteDB.setAutomaticRecordingEnabled(true);
+      await recordDiagnostic('info', 'Automatic route recording started');
+    } catch (error) {
+      console.error('Could not enable automatic route recording:', error);
+      await recordDiagnostic(
+        'error',
+        `Could not enable automatic route recording: ${describeError(error)}`
+      );
+      throw error;
+    }
+  });
 }
 
 export async function disableAutomaticRecording(): Promise<void> {
-  try {
-    await stopLocationTask();
-  } catch (error) {
-    console.error('stopLocationTask failed during disable:', error);
-    void recordDiagnostic('warning', 'stopLocationTask failed during disable recording');
-  }
-
-  try {
-    await SQLiteDB.finishRoute();
-  } catch (error) {
-    console.error('finishRoute failed during disable:', error);
-    void recordDiagnostic('warning', 'finishRoute failed during disable recording');
-  }
-
-  try {
-    await SQLiteDB.setAutomaticRecordingEnabled(false);
-  } catch (error) {
-    console.error('setAutomaticRecordingEnabled(false) failed during disable:', error);
-    void recordDiagnostic('warning', 'setAutomaticRecordingEnabled failed during disable');
-  }
-
-  await recordDiagnostic('info', 'Automatic route recording stopped');
+  return serializeLifecycle(async () => {
+    try {
+      await stopLocationUpdates();
+      await SQLiteDB.finishRoute();
+      await SQLiteDB.setAutomaticRecordingEnabled(false);
+      await recordDiagnostic('info', 'Automatic route recording stopped');
+    } catch (error) {
+      console.error('Could not disable automatic route recording:', error);
+      await recordDiagnostic(
+        'error',
+        `Could not disable automatic route recording: ${describeError(error)}`
+      );
+      throw error;
+    }
+  });
 }

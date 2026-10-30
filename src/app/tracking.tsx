@@ -13,8 +13,10 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { SQLiteDB, type Route } from '@services/database';
 import {
   disableAutomaticRecording,
+  enableAutomaticRecording,
   ensureAutomaticRecording,
-  startLocationTask,
+  getLocationRecordingMode,
+  type LocationRecordingMode,
 } from '@services/locationService';
 import { recordDiagnostic } from '@services/diagnostics';
 
@@ -34,6 +36,8 @@ export default function TrackingScreen() {
   const [route, setRoute] = useState<Route | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [recordingMode, setRecordingMode] = useState<LocationRecordingMode | null>(null);
+  const [recordingUnavailable, setRecordingUnavailable] = useState(false);
 
   const refreshRoute = useCallback(async () => {
     const activeId = await SQLiteDB.getActiveRouteId();
@@ -49,14 +53,18 @@ export default function TrackingScreen() {
       screenFocused.current = true;
       const refresh = async () => {
         try {
-          if (await SQLiteDB.isAutomaticRecordingEnabled()) {
-            await ensureAutomaticRecording();
-          }
+          const enabled = await SQLiteDB.isAutomaticRecordingEnabled();
+          const started = enabled ? await ensureAutomaticRecording() : false;
+          const mode = started ? await getLocationRecordingMode() : null;
           const activeId = await SQLiteDB.getActiveRouteId();
           const currentRoute = activeId
             ? await SQLiteDB.getRouteById(activeId, 1_500)
             : null;
-          if (active) setRoute(currentRoute);
+          if (active) {
+            setRoute(currentRoute);
+            setRecordingMode(mode);
+            setRecordingUnavailable(enabled && mode === null);
+          }
         } catch (error) {
           console.error('Could not restore active recording:', error);
           void recordDiagnostic('error', 'Could not restore active route recording');
@@ -70,7 +78,12 @@ export default function TrackingScreen() {
       void refresh();
       const interval = setInterval(() => {
         if (active) {
-          refreshRoute().catch(error => {
+          Promise.all([
+            refreshRoute(),
+            getLocationRecordingMode().then(mode => {
+              if (active) setRecordingMode(mode);
+            }),
+          ]).catch(error => {
             console.error('Could not refresh active route:', error);
             void recordDiagnostic('error', 'Could not refresh active route recording');
           });
@@ -89,15 +102,11 @@ export default function TrackingScreen() {
     busyRef.current = true;
     setBusy(true);
     try {
-      const activeId = await SQLiteDB.getActiveRouteId();
-      if (!activeId) await SQLiteDB.startRoute('Определяется');
-      try {
-        await startLocationTask();
-      } catch (error) {
-        if (!activeId) await SQLiteDB.finishRoute();
-        throw error;
-      }
-      await SQLiteDB.setAutomaticRecordingEnabled(true);
+      await enableAutomaticRecording();
+      const mode = await getLocationRecordingMode();
+      if (!mode) throw new Error('Служба геолокации не запустилась. Попробуйте ещё раз.');
+      setRecordingMode(mode);
+      setRecordingUnavailable(false);
       await recordDiagnostic('info', 'Route recording started from tracking screen');
       await refreshRoute();
     } catch (error) {
@@ -119,6 +128,8 @@ export default function TrackingScreen() {
     setBusy(true);
     try {
       await disableAutomaticRecording();
+      setRecordingMode(null);
+      setRecordingUnavailable(false);
       await recordDiagnostic('info', 'Route recording stopped from tracking screen');
       await refreshRoute();
       router.replace('/');
@@ -147,21 +158,35 @@ export default function TrackingScreen() {
     }
   }
 
-  const isTracking = route !== null;
+  const isTracking = recordingMode !== null;
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
       <StatusBar barStyle="dark-content" />
       <View style={styles.content}>
         <Text style={styles.title}>
-          {loading ? 'Проверяем запись…' : isTracking ? 'Запись активна' : 'Запись остановлена'}
+          {loading
+            ? 'Проверяем запись…'
+            : recordingMode === 'background'
+              ? 'Фоновая запись активна'
+              : recordingMode === 'foreground'
+                ? 'Запись активна, пока приложение открыто'
+                : recordingUnavailable
+                  ? 'Не удалось запустить запись'
+                : 'Запись остановлена'}
         </Text>
         {loading ? (
           <ActivityIndicator color="#168A57" style={styles.loading} />
         ) : (
           <>
             <Text style={styles.transport}>
-              Транспорт: {route?.transportMode ?? 'Определяется'}
+              {route
+                ? `Транспорт: ${route.transportMode}`
+                : recordingMode
+                  ? 'Ожидаем первую GPS-точку…'
+                  : recordingUnavailable
+                    ? 'Проверьте доступ к геолокации и повторите запуск.'
+                  : 'Последний маршрут сохранён'}
             </Text>
             {route && (
               <>
@@ -186,7 +211,13 @@ export default function TrackingScreen() {
               style={[styles.actionButton, isTracking && styles.stopButton, busy && styles.disabled]}
             >
               <Text style={styles.actionText}>
-                {busy ? 'Подождите…' : isTracking ? 'Остановить запись' : 'Начать запись'}
+                {busy
+                  ? 'Подождите…'
+                  : isTracking
+                    ? 'Остановить запись'
+                    : recordingUnavailable
+                      ? 'Повторить запуск'
+                      : 'Начать или возобновить запись'}
               </Text>
             </TouchableOpacity>
           </>

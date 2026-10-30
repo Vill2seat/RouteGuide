@@ -6,6 +6,30 @@ const ts = require('typescript');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, 'database.ts'), 'utf8');
+let openDatabaseHandler = async () => {
+  throw new Error('SQLite mock is not configured');
+};
+let backupDatabaseHandler = async () => {
+  throw new Error('SQLite backup mock is not configured');
+};
+let deleteDatabaseHandler = async () => {
+  throw new Error('SQLite delete mock is not configured');
+};
+const sqliteMock = {
+  openDatabaseAsync: (...args) => openDatabaseHandler(...args),
+  backupDatabaseAsync: options => backupDatabaseHandler(options),
+  deleteDatabaseAsync: (...args) => deleteDatabaseHandler(...args),
+};
+const cryptoMock = {
+  randomUUID: () => 'fixed-uuid-1234',
+  getRandomBytesAsync: async count => new Uint8Array(count).fill(0x2a),
+};
+let getSecureStoreItem = async () => null;
+let setSecureStoreItem = async () => {};
+const secureStoreMock = {
+  getItemAsync: (...args) => getSecureStoreItem(...args),
+  setItemAsync: (...args) => setSecureStoreItem(...args),
+};
 const javascript = ts.transpile(source, {
   module: ts.ModuleKind.CommonJS,
   target: ts.ScriptTarget.ES2020,
@@ -15,9 +39,9 @@ vm.runInNewContext(javascript, {
   module: loadedModule,
   exports: loadedModule.exports,
   require: specifier => {
-    if (specifier === 'expo-sqlite') return {};
-    if (specifier === 'expo-crypto') return { randomUUID: () => 'fixed-uuid-1234' };
-    if (specifier === 'expo-secure-store') return {};
+    if (specifier === 'expo-sqlite') return sqliteMock;
+    if (specifier === 'expo-crypto') return cryptoMock;
+    if (specifier === 'expo-secure-store') return secureStoreMock;
     if (specifier === './transportClassifier') {
       return { classifyTransport: () => null };
     }
@@ -141,6 +165,43 @@ test('appendLocations stores a new point once and ignores duplicate timestamps',
   ]);
 
   assert.equal(insertedPointStatements.length, 1);
+});
+
+test('preserves low-accuracy GPS fixes without counting them as reliable distance', async () => {
+  const inserted = [];
+  const routeUpdates = [];
+  installDatabase({
+    getFirstAsync: async sql => {
+      if (sql.includes('JOIN routes')) {
+        return { route_id: routeId, start_time: startTime };
+      }
+      if (sql.includes('SELECT latitude, longitude, timestamp')) return null;
+      if (sql.includes('mode_locked')) return { mode_locked: 1 };
+      return null;
+    },
+    withTransactionAsync: async callback => callback(),
+    runAsync: async (sql, params) => {
+      if (sql.includes('INTO route_points')) inserted.push(params);
+      if (sql.includes('UPDATE routes')) routeUpdates.push(params);
+    },
+    getAllAsync: async () => [],
+  });
+
+  await SQLiteDB.appendLocations([{
+    timestamp: Date.parse(startTime) + 60_000,
+    coords: {
+      latitude: 55.756,
+      longitude: 37.618,
+      altitude: null,
+      accuracy: 150,
+      speed: 0,
+      heading: null,
+    },
+  }]);
+
+  assert.equal(inserted.length, 1);
+  assert.equal(inserted[0][6], 150);
+  assert.equal(routeUpdates[0][0], 0);
 });
 
 test('getLocalDaySnapshot reads only the selected local day and maps places', async () => {
@@ -282,6 +343,82 @@ test('database schema creates local timeline tables and migrates older point tab
   assert.match(schemaSql, /CREATE TABLE IF NOT EXISTS route_bookmarks/);
   assert.match(schemaSql, /ALTER TABLE route_points ADD COLUMN transport_mode_override TEXT/);
   assert.doesNotMatch(schemaSql, /FROM metadata/);
+});
+
+test('initializes SQLCipher and removes the plaintext database only after verified migration', async () => {
+  const operations = [];
+  let storedKey = null;
+  let encryptedHasSchema = false;
+  let legacyDeleted = false;
+  const legacyTables = [
+    { name: 'routes' },
+    { name: 'route_points' },
+    { name: 'day_places' },
+  ];
+  const rowCounts = {
+    routes: 2,
+    route_points: 17,
+    day_places: 3,
+  };
+  const encryptedDatabase = {
+    execAsync: async sql => operations.push(`exec:${sql}`),
+    getFirstAsync: async sql => {
+      if (sql.includes('cipher_version')) return { cipher_version: '4.6.1' };
+      if (sql.includes('sqlite_master')) {
+        return encryptedHasSchema ? { name: 'routes' } : null;
+      }
+      const countTable = sql.match(/FROM (routes|route_points|day_places)/)?.[1];
+      if (countTable) return { count: rowCounts[countTable] };
+      return null;
+    },
+    getAllAsync: async sql => {
+      if (sql.includes('sqlite_master')) return encryptedHasSchema ? legacyTables : [];
+      if (sql.includes('table_info(routes)')) {
+        return [{ name: 'transport_confidence' }, { name: 'mode_locked' }];
+      }
+      if (sql.includes('table_info(route_points)')) {
+        return [{ name: 'transport_mode_override' }];
+      }
+      return [{ name: 'created_at' }, { name: 'updated_at' }];
+    },
+    withTransactionAsync: async callback => callback(),
+    closeAsync: async () => {},
+  };
+  const legacyDatabase = {
+    getAllAsync: async () => legacyTables,
+    getFirstAsync: async sql => {
+      const countTable = sql.match(/FROM (routes|route_points|day_places)/)?.[1];
+      return countTable ? { count: rowCounts[countTable] } : null;
+    },
+    closeAsync: async () => {},
+  };
+
+  openDatabaseHandler = async name =>
+    name === 'route_guide_encrypted.db' ? encryptedDatabase : legacyDatabase;
+  backupDatabaseHandler = async ({ sourceDatabase, destDatabase }) => {
+    assert.equal(sourceDatabase, legacyDatabase);
+    assert.equal(destDatabase, encryptedDatabase);
+    encryptedHasSchema = true;
+    operations.push('backup');
+  };
+  deleteDatabaseHandler = async name => {
+    assert.equal(name, 'route_guide.db');
+    legacyDeleted = true;
+    operations.push('delete-legacy');
+  };
+  getSecureStoreItem = async () => storedKey;
+  setSecureStoreItem = async (_name, value) => {
+    storedKey = value;
+  };
+  SQLiteDB.db = null;
+  SQLiteDB.initializing = null;
+
+  await SQLiteDB.init();
+
+  assert.match(storedKey, /^[\da-f]{64}$/);
+  assert.ok(operations[0].includes(`PRAGMA key = "x'${storedKey}'"`));
+  assert.ok(operations.indexOf('backup') < operations.indexOf('delete-legacy'));
+  assert.equal(legacyDeleted, true);
 });
 
 test('profile updates work with a legacy table that has no singleton constraint', async () => {

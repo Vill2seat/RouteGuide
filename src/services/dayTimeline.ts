@@ -42,6 +42,7 @@ export type DayMetrics = {
 const stopMinimumDurationMs = 8 * 60 * 1000;
 const stopMaximumGapMs = 15 * 60 * 1000;
 const stopRadiusMeters = 80;
+const maxMovementGapMs = 10 * 60 * 1000;
 
 function distanceMeters(
   latitude1: number,
@@ -64,10 +65,10 @@ function pointSpeed(
   point: RoutePoint,
   previous: RoutePoint | undefined
 ): number | null {
-  if (point.speed >= 0) return point.speed;
+  if (Number.isFinite(point.speed) && point.speed > 0) return point.speed;
   if (!previous) return null;
   const seconds = (point.timestamp.getTime() - previous.timestamp.getTime()) / 1000;
-  if (seconds <= 0 || seconds > 5 * 60) return null;
+  if (seconds <= 0 || seconds * 1000 > maxMovementGapMs) return null;
   return (
     distanceMeters(
       previous.latitude,
@@ -90,6 +91,7 @@ function dominantMode(points: RoutePoint[]): { mode: string; confidence: number 
   const manualCounts = new Map<string, number>();
   for (let index = 0; index < points.length; index += 1) {
     const point = points[index];
+    if (point.accuracy > 100) continue;
     if (point.transportModeOverride) {
       manualCounts.set(
         point.transportModeOverride,
@@ -146,14 +148,18 @@ function findStops(points: RoutePoint[]): StopRun[] {
             point.longitude
           );
     const stationary =
-      (speed !== null && speed < 0.7) ||
+      point.accuracy <= 100 &&
+      ((speed !== null && speed < 0.7) ||
       (previous !== null &&
+        previous.accuracy <= 100 &&
         gap > 0 &&
         gap <= stopMaximumGapMs &&
-        previousDistance <= stopRadiusMeters);
+        previousDistance <= stopRadiusMeters));
     if (
       start < 0 &&
       previous !== null &&
+      previous.accuracy <= 100 &&
+      point.accuracy <= 100 &&
       gap >= stopMinimumDurationMs &&
       gap <= stopMaximumGapMs &&
       previousDistance <= stopRadiusMeters
@@ -206,9 +212,9 @@ export function buildDayMetrics(points: RoutePoint[]): DayMetrics {
   for (let index = 1; index < points.length; index += 1) {
     const previous = points[index - 1];
     const point = points[index];
-    if (previous.accuracy > 200 || point.accuracy > 200) continue;
+    if (previous.accuracy > 100 || point.accuracy > 100) continue;
     const seconds = (point.timestamp.getTime() - previous.timestamp.getTime()) / 1000;
-    if (seconds <= 0 || seconds > 10 * 60) continue;
+    if (seconds <= 0 || seconds * 1000 > maxMovementGapMs) continue;
 
     const distance = distanceMeters(
       previous.latitude,
@@ -271,15 +277,17 @@ export function buildDayTimeline(
     for (let index = 1; index < tripPoints.length; index += 1) {
       const previous = tripPoints[index - 1];
       const point = tripPoints[index];
+      if (previous.accuracy > 100 || point.accuracy > 100) continue;
       const seconds = (point.timestamp.getTime() - previous.timestamp.getTime()) / 1000;
-      if (seconds <= 0 || seconds > 5 * 60) continue;
-      distanceKm +=
-        distanceMeters(
-          previous.latitude,
-          previous.longitude,
-          point.latitude,
-          point.longitude
-        ) / 1_000;
+      if (seconds <= 0 || seconds * 1000 > maxMovementGapMs) continue;
+      const distance = distanceMeters(
+        previous.latitude,
+        previous.longitude,
+        point.latitude,
+        point.longitude
+      );
+      if (distance > 5_000) continue;
+      distanceKm += distance / 1_000;
       durationSeconds += Math.min(seconds, 120);
     }
     const { mode, confidence } = dominantMode(tripPoints);

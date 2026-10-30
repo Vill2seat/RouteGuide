@@ -107,3 +107,49 @@ test('does not count long location gaps as traveled distance or moving time', ()
   assert.ok(metrics.distanceKm < 0.2);
   assert.equal(metrics.movingSeconds, 60);
 });
+
+test('infers movement from coordinates when the platform reports zero speed', () => {
+  const points = [
+    point('a', 0, 50, 19, 0),
+    point('b', 1, 50.001, 19, 0),
+    point('c', 2, 50.002, 19, 0),
+    point('d', 3, 50.003, 19, 0),
+  ];
+
+  const metrics = buildDayMetrics(points);
+  const events = buildDayTimeline(points, []);
+
+  assert.ok(metrics.distanceKm > 0.2);
+  assert.equal(events[0].kind, 'trip');
+  assert.equal(events[0].trip.transportMode, 'Пешком');
+});
+
+test('keeps plausible movement across delayed fixes up to ten minutes apart', () => {
+  const points = [
+    point('a', 0, 50, 19, 0),
+    point('b', 6, 50.001, 19, 0),
+    point('c', 12, 50.002, 19, 0),
+  ];
+
+  const metrics = buildDayMetrics(points);
+  const events = buildDayTimeline(points, []);
+
+  assert.ok(metrics.distanceKm > 0.2);
+  assert.equal(metrics.movingSeconds, 240);
+  assert.equal(events.length, 1);
+  assert.ok(events[0].kind === 'trip' && events[0].trip.distanceKm > 0.2);
+});
+
+test('does not infer distance from low-accuracy fixes', () => {
+  const first = point('a', 0, 50, 19, 0);
+  const second = point('b', 1, 50.001, 19, 0);
+  first.accuracy = 150;
+
+  const metrics = buildDayMetrics([first, second]);
+  const events = buildDayTimeline([first, second], []);
+
+  assert.equal(metrics.distanceKm, 0);
+  assert.equal(metrics.movingSeconds, 0);
+  assert.equal(events[0].kind, 'trip');
+  assert.equal(events[0].trip.distanceKm, 0);
+});

@@ -26,6 +26,8 @@ import {
   disableAutomaticRecording,
   enableAutomaticRecording,
   ensureAutomaticRecording,
+  getLocationRecordingMode,
+  type LocationRecordingMode,
 } from '@services/locationService';
 import {
   buildDayMetrics,
@@ -53,6 +55,8 @@ export default function HomeScreen() {
   const [snapshot, setSnapshot] = useState<LocalDaySnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [recordingEnabled, setRecordingEnabled] = useState(true);
+  const [recordingMode, setRecordingMode] = useState<LocationRecordingMode | null>(null);
+  const [recordingUnavailable, setRecordingUnavailable] = useState(false);
   const [cityConditions, setCityConditions] = useState<CityConditions | null>(null);
   const [conditionsLoading, setConditionsLoading] = useState(false);
   const [placeModalVisible, setPlaceModalVisible] = useState(false);
@@ -70,6 +74,14 @@ export default function HomeScreen() {
     setRecordingEnabled(enabled);
     setSnapshot(data);
     return data;
+  }, []);
+
+  const refreshRecordingStatus = useCallback(async () => {
+    const enabled = await SQLiteDB.isAutomaticRecordingEnabled();
+    if (!enabled) return { enabled: false, mode: null };
+    const started = await ensureAutomaticRecording();
+    const mode = started ? await getLocationRecordingMode() : null;
+    return { enabled: true, mode };
   }, []);
 
   useFocusEffect(
@@ -90,9 +102,11 @@ export default function HomeScreen() {
             return;
           }
 
-          if (await SQLiteDB.isAutomaticRecordingEnabled()) {
-            await ensureAutomaticRecording();
-          }
+          const recording = await refreshRecordingStatus();
+          if (!active) return;
+          setRecordingEnabled(recording.enabled);
+          setRecordingMode(recording.mode);
+          setRecordingUnavailable(recording.enabled && recording.mode === null);
           const data = await refreshDay();
           if (!active) return;
 
@@ -134,10 +148,17 @@ export default function HomeScreen() {
 
       const interval = setInterval(() => {
         if (active && AppState.currentState === 'active') {
-          refreshDay().catch(error => {
-            console.error('Could not refresh today timeline:', error);
-            void recordDiagnostic('error', 'Could not refresh local day timeline');
-          });
+          Promise.all([refreshDay(), refreshRecordingStatus()])
+            .then(([, recording]) => {
+              if (!active) return;
+              setRecordingEnabled(recording.enabled);
+              setRecordingMode(recording.mode);
+              setRecordingUnavailable(recording.enabled && recording.mode === null);
+            })
+            .catch(error => {
+              console.error('Could not refresh today timeline or recording status:', error);
+              void recordDiagnostic('error', 'Could not refresh local day timeline or recording status');
+            });
         }
       }, 120_000);
 
@@ -145,7 +166,7 @@ export default function HomeScreen() {
         active = false;
         clearInterval(interval);
       };
-    }, [refreshDay, router])
+    }, [refreshDay, refreshRecordingStatus, router])
   );
 
   const points = snapshot?.points ?? [];
@@ -221,12 +242,18 @@ export default function HomeScreen() {
   async function toggleRecording() {
     setLoading(true);
     try {
-      if (recordingEnabled) {
+      if (recordingEnabled && recordingMode) {
         await disableAutomaticRecording();
         setRecordingEnabled(false);
+        setRecordingMode(null);
+        setRecordingUnavailable(false);
       } else {
         await enableAutomaticRecording();
+        const mode = await getLocationRecordingMode();
+        if (!mode) throw new Error('Служба геолокации не запустилась. Попробуйте ещё раз.');
         setRecordingEnabled(true);
+        setRecordingMode(mode);
+        setRecordingUnavailable(false);
       }
       await refreshDay();
     } catch (error) {
@@ -392,9 +419,15 @@ export default function HomeScreen() {
             {loading ? 'Загружаем ваш день…' : 'Маршрут дня появится здесь'}
           </Text>
           <Text style={styles.mapEmptyText}>
-            {recordingEnabled
-              ? 'Точки сохраняются на устройстве по мере получения GPS-сигнала.'
-              : 'Запись приостановлена. Можно включить её в любой момент.'}
+            {recordingUnavailable
+              ? 'Не удалось запустить службу геолокации. Повторите запуск ниже.'
+              : recordingMode === 'foreground'
+                ? 'Точки сохраняются, пока приложение открыто. Для фоновой записи разрешите геолокацию «Всегда».'
+                : recordingMode === 'background'
+                  ? 'Точки сохраняются на устройстве по мере получения GPS-сигнала.'
+                  : recordingEnabled
+                    ? 'Запись включена, но GPS-служба не активна. Повторите запуск ниже.'
+                    : 'Запись приостановлена. Можно включить её в любой момент.'}
           </Text>
           {loading && <ActivityIndicator color="#23644F" style={styles.mapSpinner} />}
         </View>
@@ -458,18 +491,36 @@ export default function HomeScreen() {
 
           <View style={styles.recordingCard}>
             <View style={styles.recordingStatus}>
-              <View style={[styles.statusDot, recordingEnabled && styles.statusDotActive]} />
+              <View
+                style={[
+                  styles.statusDot,
+                  recordingMode && styles.statusDotActive,
+                  recordingUnavailable && styles.statusDotUnavailable,
+                ]}
+              />
               <View style={styles.recordingCopy}>
                 <Text style={styles.recordingTitle}>
-                  {recordingEnabled ? 'Автоматическая запись включена' : 'Запись приостановлена'}
+                  {recordingMode === 'background'
+                    ? 'Фоновая запись активна'
+                    : recordingMode === 'foreground'
+                      ? 'Запись активна, пока приложение открыто'
+                      : recordingUnavailable
+                        ? 'Запись не запущена'
+                        : 'Запись приостановлена'}
                 </Text>
                 <Text style={styles.recordingNote}>
-                  {lastRecorded
+                  {recordingUnavailable
+                    ? 'Не удалось запустить геолокацию. Нажмите «Повторить запуск».'
+                    : lastRecorded
                     ? `Точка обновлена в ${lastRecorded.toLocaleTimeString('ru-RU', {
                         hour: '2-digit',
                         minute: '2-digit',
                       })} · хранится на этом устройстве`
-                    : 'GPS может обновляться реже для экономии батареи'}
+                    : recordingMode === 'foreground'
+                      ? 'Для записи при заблокированном экране проверьте доступ фоновой геолокации.'
+                      : recordingMode === 'background'
+                        ? 'Ожидаем GPS-точку; экономия батареи может увеличить интервал.'
+                        : 'Включите автоматическую запись, чтобы сохранять перемещения.'}
                 </Text>
               </View>
             </View>
@@ -480,7 +531,13 @@ export default function HomeScreen() {
               onPress={() => void toggleRecording()}
             >
               <Text style={styles.pauseText}>
-                {loading ? '…' : recordingEnabled ? 'Ⅱ  Пауза' : '▶  Включить'}
+                {loading
+                  ? '…'
+                  : recordingMode
+                    ? 'Ⅱ  Пауза'
+                    : recordingUnavailable
+                      ? '↻  Повторить запуск'
+                      : '▶  Включить'}
               </Text>
             </TouchableOpacity>
           </View>
@@ -809,6 +866,7 @@ const styles = StyleSheet.create({
   recordingStatus: { flex: 1, flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
   statusDot: { width: 8, height: 8, marginTop: 4, borderRadius: 4, backgroundColor: '#9BA69E' },
   statusDotActive: { backgroundColor: '#23644F' },
+  statusDotUnavailable: { backgroundColor: '#B42318' },
   recordingCopy: { flex: 1 },
   recordingTitle: { color: '#23644F', fontSize: 12, fontWeight: '600' },
   recordingNote: { color: '#738078', fontSize: 10, lineHeight: 15, marginTop: 3 },

@@ -75,8 +75,10 @@ Provider URLs can be overridden with `EXPO_PUBLIC_MAP_STYLE_URL`,
 The profile is a local display name, not a cloud identity: no email, password,
 remote account, or cross-device synchronization exists. Routes, points,
 manual place labels, and diagnostic logs are stored in the on-device SQLite
-database. SQLCipher is enabled, with its randomly generated key held in
-Android Keystore/iOS Keychain.
+database. SQLCipher is enabled, with a randomly generated key held in Android
+Keystore/iOS Keychain. Existing plaintext databases are copied into a keyed
+database, verified, and deleted only after the migrated route and point counts
+match.
 Diagnostic logs are capped at 500 entries and omit GPS coordinates; users can
 export or clear them in Settings. Android cloud backup is disabled so the
 database is not copied without its device-only encryption key. Settings also

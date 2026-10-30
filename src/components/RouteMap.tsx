@@ -32,6 +32,15 @@ type RouteMapProps = {
 
 const maxRenderedRoutePoints = 1_200;
 
+function isValidCoordinate(point: Coordinate): boolean {
+  return (
+    Number.isFinite(point.latitude) &&
+    Number.isFinite(point.longitude) &&
+    Math.abs(point.latitude) <= 90 &&
+    Math.abs(point.longitude) <= 180
+  );
+}
+
 function simplifyCoordinates(coordinates: Coordinate[]): Coordinate[] {
   if (coordinates.length <= maxRenderedRoutePoints) return coordinates;
 
@@ -42,6 +51,7 @@ function simplifyCoordinates(coordinates: Coordinate[]): Coordinate[] {
 }
 
 function routeBounds(coordinates: Coordinate[]): InitialViewState {
+  coordinates = coordinates.filter(isValidCoordinate);
   if (!coordinates.length) {
     return { center: [0, 20], zoom: 1.5 };
   }
@@ -99,8 +109,9 @@ export default function RouteMap({
     () => ({
       type: 'FeatureCollection',
       features: routes.flatMap(route => {
-        if (route.coordinates.length < 2) return [];
-        const renderCoordinates = simplifyCoordinates(route.coordinates);
+        const validCoordinates = route.coordinates.filter(isValidCoordinate);
+        if (validCoordinates.length < 2) return [];
+        const renderCoordinates = simplifyCoordinates(validCoordinates);
         return [
           {
             type: 'Feature' as const,
@@ -116,15 +127,24 @@ export default function RouteMap({
     [routes]
   );
   const allCoordinates = useMemo(
-    () => routes.flatMap(route => route.coordinates),
+    () => routes.flatMap(route => route.coordinates.filter(isValidCoordinate)),
     [routes]
   );
+  const validVisitMarkers = useMemo(
+    () => visitMarkers.filter(isValidCoordinate),
+    [visitMarkers]
+  );
+  const validCurrentLocation =
+    currentLocation && isValidCoordinate(currentLocation) ? currentLocation : null;
   const mapCoordinates = useMemo(
-    () => [...allCoordinates, ...visitMarkers],
-    [allCoordinates, visitMarkers]
+    () => [...allCoordinates, ...validVisitMarkers],
+    [allCoordinates, validVisitMarkers]
   );
   const camera = useMemo(
-    () => routeBounds(cameraTarget ? [cameraTarget] : mapCoordinates),
+    () =>
+      routeBounds(
+        cameraTarget && isValidCoordinate(cameraTarget) ? [cameraTarget] : mapCoordinates
+      ),
     [cameraTarget, mapCoordinates]
   );
   const markerFeatures = useMemo<FeatureCollection<Point>>(
@@ -158,7 +178,7 @@ export default function RouteMap({
                 : []),
             ]
           : []),
-        ...visitMarkers.map(visit => ({
+        ...validVisitMarkers.map(visit => ({
           type: 'Feature' as const,
           properties: { kind: 'visit', label: visit.label, id: visit.id },
           geometry: {
@@ -166,21 +186,24 @@ export default function RouteMap({
             coordinates: [visit.longitude, visit.latitude],
           },
         })),
-        ...(currentLocation
+        ...(validCurrentLocation
           ? [
               {
                 type: 'Feature' as const,
                 properties: { kind: 'current-location', label: '' },
                 geometry: {
                   type: 'Point' as const,
-                  coordinates: [currentLocation.longitude, currentLocation.latitude],
+                  coordinates: [
+                    validCurrentLocation.longitude,
+                    validCurrentLocation.latitude,
+                  ],
                 },
               },
             ]
           : []),
       ],
     }),
-    [allCoordinates, currentLocation, visitMarkers]
+    [allCoordinates, validCurrentLocation, validVisitMarkers]
   );
 
   function handleMarkerPress(
