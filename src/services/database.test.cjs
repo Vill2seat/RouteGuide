@@ -16,7 +16,7 @@ vm.runInNewContext(javascript, {
   exports: loadedModule.exports,
   require: specifier => {
     if (specifier === 'expo-sqlite') return {};
-    if (specifier === 'expo-crypto') return {};
+    if (specifier === 'expo-crypto') return { randomUUID: () => 'fixed-uuid-1234' };
     if (specifier === 'expo-secure-store') return {};
     if (specifier === './transportClassifier') {
       return { classifyTransport: () => null };

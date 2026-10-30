@@ -19,6 +19,7 @@ import RouteOptionCard from '@components/RouteOptionCard';
 import { SQLiteDB } from '@services/database';
 import WalkIcon from '@assets/icons/walk.svg';
 import {
+  assertCoordinate,
   getCurrentRouteCandidates,
   getRouteRecommendations,
   parseRouteCandidate,
@@ -209,6 +210,9 @@ export default function RoutePlannerScreen() {
             resolveAddress(destination, false),
           ]);
       const [start, end] = startAndEnd;
+      // Валидируем координаты перед запросом к сервису маршрутов — невалидные координаты вызывают вылет
+      assertCoordinate(start);
+      assertCoordinate(end);
       const results = await getRouteRecommendations(start, end);
       if (currentRequestId !== requestId.current) return;
       setCandidates(results);

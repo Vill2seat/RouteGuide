@@ -43,6 +43,7 @@ import RouteIcon from '@assets/icons/route.svg';
 import WalkIcon from '@assets/icons/walk.svg';
 import useReducedMotion from '@hooks/useReducedMotion';
 import VisitSheet from '@components/VisitSheet';
+import { assertCoordinate } from '@services/routeService';
 
 export default function HomeScreen() {
   const router = useRouter();
@@ -116,12 +117,15 @@ export default function HomeScreen() {
           }
         } catch (error) {
           if (!active) return;
-          console.error('Could not load today or resume automatic recording:', error);
-          void recordDiagnostic('error', 'Could not load today or resume automatic recording');
-          Alert.alert(
-            'Ошибка',
-            error instanceof Error ? error.message : 'Не удалось загрузить данные приложения.'
-          );
+          // Если база пустая (маршруты ещё не начинались) — не показываем ложный алерт.
+          if (!/no routes|No routes|empty/i.test(error instanceof Error ? error.message : '')) {
+            console.error('Could not load today or resume automatic recording:', error);
+            void recordDiagnostic('error', 'Could not load today or resume automatic recording');
+            Alert.alert(
+              'Ошибка',
+              error instanceof Error ? error.message : 'Не удалось загрузить данные приложения.'
+            );
+          }
         } finally {
           if (active) setLoading(false);
         }
@@ -195,6 +199,11 @@ export default function HomeScreen() {
       }
       const position = await Location.getCurrentPositionAsync({
         accuracy: Location.Accuracy.Balanced,
+      });
+      // Валидируем координаты перед передачей в нативную карту — NaN/Infinity вызывают вылет MapLibre
+      assertCoordinate({
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
       });
       setMapFocus({
         latitude: position.coords.latitude,

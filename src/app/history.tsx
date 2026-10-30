@@ -37,6 +37,7 @@ import {
   setHistoryScrollOffset,
   setHistorySelectedDate,
 } from '@services/screenState';
+import { assertCoordinate } from '@services/routeService';
 
 function shiftCalendarDate(date: Date, amount: number): Date {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate() + amount);
@@ -80,9 +81,15 @@ export default function HistoryScreen() {
           if (active) setSnapshot(data);
         })
         .catch(error => {
-          console.error('Could not load local day history:', error);
-          void recordDiagnostic('error', 'Could not load local day history');
-          Alert.alert('Ошибка', 'Не удалось загрузить историю за выбранный день.');
+          // Если база пустая (ещё нет маршрутов или день не начался) — не показываем
+          // ложный алерт, а оставляем «пустое» состояние экрана.
+          if (!/No routes|no routes|empty/i.test(error instanceof Error ? error.message : '')) {
+            console.error('Could not load local day history:', error);
+            void recordDiagnostic('error', 'Could not load local day history');
+            if (active) {
+              Alert.alert('Ошибка', 'Не удалось загрузить историю за выбранный день.');
+            }
+          }
         })
         .finally(() => {
           if (active) setLoading(false);
@@ -226,6 +233,11 @@ export default function HistoryScreen() {
       }
       const position = await Location.getCurrentPositionAsync({
         accuracy: Location.Accuracy.Balanced,
+      });
+      // Валидируем координаты перед передачей в нативную карту — NaN/Infinity вызывают вылет MapLibre
+      assertCoordinate({
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
       });
       setMapFocus({
         latitude: position.coords.latitude,

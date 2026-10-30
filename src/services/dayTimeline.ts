@@ -64,7 +64,7 @@ function pointSpeed(
   point: RoutePoint,
   previous: RoutePoint | undefined
 ): number | null {
-  if (point.speed > 0) return point.speed;
+  if (point.speed >= 0) return point.speed;
   if (!previous) return null;
   const seconds = (point.timestamp.getTime() - previous.timestamp.getTime()) / 1000;
   if (seconds <= 0 || seconds > 5 * 60) return null;
@@ -79,7 +79,7 @@ function pointSpeed(
 }
 
 function inferredMode(speed: number | null): string {
-  if (speed === null || speed < 0.7) return 'Неизвестно';
+  if (speed === null || speed < 0.3) return 'Неизвестно';
   if (speed < 2.8) return 'Пешком';
   if (speed < 8.3) return 'Велосипед';
   return 'Моторизованный транспорт';
@@ -206,9 +206,9 @@ export function buildDayMetrics(points: RoutePoint[]): DayMetrics {
   for (let index = 1; index < points.length; index += 1) {
     const previous = points[index - 1];
     const point = points[index];
-    if (previous.accuracy > 100 || point.accuracy > 100) continue;
+    if (previous.accuracy > 200 || point.accuracy > 200) continue;
     const seconds = (point.timestamp.getTime() - previous.timestamp.getTime()) / 1000;
-    if (seconds <= 0 || seconds > 5 * 60) continue;
+    if (seconds <= 0 || seconds > 10 * 60) continue;
 
     const distance = distanceMeters(
       previous.latitude,
@@ -216,10 +216,10 @@ export function buildDayMetrics(points: RoutePoint[]): DayMetrics {
       point.latitude,
       point.longitude
     );
-    if (distance > 2_000) continue;
+    if (distance > 5_000) continue;
 
     const speed = pointSpeed(point, previous);
-    if (speed === null || speed < 0.7) continue;
+    if (speed === null || speed < 0.3) continue;
     distanceKm += distance / 1_000;
     movingSeconds += Math.min(seconds, 120);
     const mode = point.transportModeOverride ?? inferredMode(speed);

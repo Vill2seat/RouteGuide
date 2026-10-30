@@ -2,7 +2,9 @@
   "compilerOptions": {
     "target": "esnext",
     "module": "esnext",
-    "lib": ["es2022"],
+    "lib": [
+      "es2022"
+    ],
     "allowJs": true,
     "jsx": "react-jsx",
     "noEmit": true,
@@ -10,11 +12,21 @@
     "strict": true,
     "moduleResolution": "bundler",
     "paths": {
-      "@components/*": ["./components/*"],
-      "@hooks/*": ["./hooks/*"],
-      "@services/*": ["./services/*"],
-      "@utils/*": ["./utils/*"],
-      "@assets/*": ["./assets/*"]
+      "@components/*": [
+        "./components/*"
+      ],
+      "@hooks/*": [
+        "./hooks/*"
+      ],
+      "@services/*": [
+        "./services/*"
+      ],
+      "@utils/*": [
+        "./utils/*"
+      ],
+      "@assets/*": [
+        "./assets/*"
+      ]
     },
     "skipLibCheck": true,
     "esModuleInterop": true,
@@ -22,6 +34,17 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true
   },
-  "include": ["app/**/*", "components/**/*", "hooks/**/*", "services/**/*", "utils/**/*", "assets/**/*"],
-  "exclude": ["node_modules", "dist"]
+  "include": [
+    "app/**/*",
+    "components/**/*",
+    "hooks/**/*",
+    "services/**/*",
+    "utils/**/*",
+    "assets/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ],
+  "extends": "expo/tsconfig.base"
 }

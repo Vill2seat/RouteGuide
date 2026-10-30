@@ -9,7 +9,9 @@
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
     "test": "node --test services/transportClassifier.test.cjs services/routeRecommendation.test.cjs services/routeService.test.cjs services/database.test.cjs services/locationService.test.cjs services/dayTimeline.test.cjs services/cityConditions.test.cjs route_guide_analysis.test.cjs",
-    "test:classifier": "node --test services/transportClassifier.test.cjs services/routeRecommendation.test.cjs"
+    "test:classifier": "node --test services/transportClassifier.test.cjs services/routeRecommendation.test.cjs",
+    "export": "expo export",
+    "build:android": "npm run export && cd android && ./gradlew assembleRelease --no-daemon 2>&1 | tail -20"
   },
   "dependencies": {
     "@maplibre/maplibre-react-native": "^11.5.0",

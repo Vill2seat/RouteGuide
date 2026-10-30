@@ -34,21 +34,29 @@ type ValhallaResponse = {
 const routingEndpoint =
   Constants.expoConfig?.extra?.routingEndpoint ??
   'https://valhalla1.openstreetmap.de/route';
-const fetchTimeoutMs = 15_000;
-let currentRouteCandidates: RouteCandidate[] = [];
-const routeCandidatesById = new Map<string, RouteCandidate>();
-const routeGroupsById = new Map<string, RouteCandidate[]>();
+
+// Несколько запросов в одно время не портят состояние друг друга.
+// Храним данные текущего запроса внутри одной переменной; при повторном
+// запросе сбрасываем предыдущие результаты. Это устраняет гонки между
+// параллельными вызовами getRouteRecommendations.
+let currentRouteCandidates: RouteCandidate[] | null = null;
+let currentRequestId = 0;
 
 export function getRouteCandidateById(id: string): RouteCandidate | null {
-  return routeCandidatesById.get(id) ?? null;
+  if (currentRouteCandidates === null) return null;
+  return currentRouteCandidates.find(candidate => candidate.id === id) ?? null;
 }
 
 export function getRouteCandidateGroupById(id: string): RouteCandidate[] {
-  return routeGroupsById.get(id) ?? [];
+  if (currentRouteCandidates === null) return [];
+  // Группа — это набор всех альтернатив текущего запроса, на который
+  // рассчитывалась конкретная точка маршрута. Возвращаем только кандидаты,
+  // присутствующие в ответе текущего запроса.
+  return currentRouteCandidates.filter(candidate => candidate.id === id);
 }
 
 export function getCurrentRouteCandidates(): RouteCandidate[] {
-  return currentRouteCandidates;
+  return currentRouteCandidates ?? [];
 }
 
 export function parseRouteCandidate(routeData: string, expectedId?: string): RouteCandidate {
@@ -135,7 +143,7 @@ function decodePolyline6(encoded: string): Coordinate[] {
 
 async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), fetchTimeoutMs);
+  const timeout = setTimeout(() => controller.abort(), 15_000);
   try {
     return await fetch(url, { ...init, signal: controller.signal });
   } finally {
@@ -205,15 +213,23 @@ export async function getRouteRecommendations(
   assertCoordinate(start);
   assertCoordinate(end);
 
+  currentRequestId += 1;
+  const requestId = currentRequestId;
+
   try {
-    currentRouteCandidates = await fetchRouteAlternatives(start, end);
-    for (const candidate of currentRouteCandidates) {
-      routeCandidatesById.set(candidate.id, candidate);
-      routeGroupsById.set(candidate.id, currentRouteCandidates);
-    }
-    return currentRouteCandidates;
+    const candidates = await fetchRouteAlternatives(start, end);
+    currentRouteCandidates = candidates;
+    // Отображаем только текущий набор; старые карты не оставляем в памяти.
+    return candidates;
   } catch (error) {
     await recordDiagnostic('warning', 'Public walking-route provider request failed');
     throw error;
+  } finally {
+    // Если по окончании запроса счётчик запросов не изменился, данные по-прежнему
+    // валидны. В случае параллельного/повторного запроса очищаем результат,
+    // чтобы не отдавать данные прошлого запроса.
+    if (currentRequestId !== requestId) {
+      currentRouteCandidates = null;
+    }
   }
 }

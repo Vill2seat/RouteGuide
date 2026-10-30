@@ -1,6 +1,5 @@
 import * as SQLite from 'expo-sqlite';
 import * as Crypto from 'expo-crypto';
-import * as SecureStore from 'expo-secure-store';
 import type * as Location from 'expo-location';
 import { localDayBounds, getLocalDateKey } from './dayTimeline';
 import { classifyTransport } from './transportClassifier';
@@ -105,49 +104,7 @@ class RouteDatabase {
     if (this.db) return;
     if (!this.initializing) {
       this.initializing = (async () => {
-        const key = await SecureStore.getItemAsync(RouteDatabase.encryptionKeyName);
-        let db: SQLite.SQLiteDatabase;
-
-        if (key) {
-          db = await SQLite.openDatabaseAsync(RouteDatabase.encryptedDatabaseName);
-          try {
-            await db.execAsync(`PRAGMA key = "x'${key}';`);
-            await this.verifyCipher(db);
-            await db.getFirstAsync('SELECT count(*) FROM sqlite_master');
-          } catch (error) {
-            await db.closeAsync();
-            throw error;
-          }
-        } else {
-          const legacyDb = await SQLite.openDatabaseAsync(RouteDatabase.databaseName);
-          const bytes = await Crypto.getRandomBytesAsync(32);
-          const newKey = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
-          let legacyDbOpen = true;
-          try {
-            await this.verifyCipher(legacyDb);
-            await this.deleteDatabaseFile(RouteDatabase.encryptedDatabaseName);
-            const directory = legacyDb.databasePath.slice(0, legacyDb.databasePath.lastIndexOf('/'));
-            const encryptedPath = `${directory}/${RouteDatabase.encryptedDatabaseName}`.replace(/'/g, "''");
-            await legacyDb.execAsync(`
-              ATTACH DATABASE '${encryptedPath}' AS encrypted KEY "x'${newKey}'";
-              SELECT sqlcipher_export('encrypted');
-              DETACH DATABASE encrypted;
-            `);
-            await legacyDb.closeAsync();
-            legacyDbOpen = false;
-            db = await SQLite.openDatabaseAsync(RouteDatabase.encryptedDatabaseName);
-            await db.execAsync(`PRAGMA key = "x'${newKey}';`);
-            await this.verifyCipher(db);
-            await db.getFirstAsync('SELECT count(*) FROM sqlite_master');
-            await SecureStore.setItemAsync(RouteDatabase.encryptionKeyName, newKey);
-            await this.deleteDatabaseFile(RouteDatabase.databaseName);
-          } catch (error) {
-            if (legacyDbOpen) await legacyDb.closeAsync();
-            throw new Error('Не удалось включить шифрование локальной базы данных.', {
-              cause: error,
-            });
-          }
-        }
+        const db = await SQLite.openDatabaseAsync(RouteDatabase.databaseName);
 
         await this.initializeSchema(db);
         this.db = db;
@@ -462,7 +419,7 @@ class RouteDatabase {
           const distance = previous
             ? this.distanceInKm(previous.latitude, previous.longitude, latitude, longitude)
             : 0;
-          const pointId = `${active.route_id}_${location.timestamp}`;
+          const pointId = `${active.route_id}_${Crypto.randomUUID()}`;
           await db.runAsync(
             `INSERT OR IGNORE INTO route_points
              (id, route_id, timestamp, latitude, longitude, altitude, accuracy, speed, heading)
@@ -753,19 +710,36 @@ class RouteDatabase {
 
   async clearAll(): Promise<void> {
     const db = await this.database();
+    const active = await db.getFirstAsync<{ route_id: string }>(
+      'SELECT route_id FROM active_tracking WHERE singleton = 1'
+    );
+    if (active?.route_id) {
+      throw new Error(
+        'Нельзя удалить все данные, пока запись маршрута ещё активна. Сначала остановите запись.'
+      );
+    }
     await db.withTransactionAsync(async () => {
-      await db.runAsync('DELETE FROM active_tracking');
       await db.runAsync('DELETE FROM route_points');
       await db.runAsync('DELETE FROM routes');
       await db.runAsync('DELETE FROM day_places');
       await db.runAsync('DELETE FROM route_bookmarks');
+      await db.runAsync('DELETE FROM diagnostic_logs');
+      await db.runAsync('DELETE FROM local_profile');
+      await db.runAsync('DELETE FROM app_settings');
     });
   }
 
   async clearAllLocalData(): Promise<void> {
     const db = await this.database();
+    const active = await db.getFirstAsync<{ route_id: string }>(
+      'SELECT route_id FROM active_tracking WHERE singleton = 1'
+    );
+    if (active?.route_id) {
+      throw new Error(
+        'Нельзя удалить все локальные данные, пока запись маршрута ещё активна. Сначала остановите запись.'
+      );
+    }
     await db.withTransactionAsync(async () => {
-      await db.runAsync('DELETE FROM active_tracking');
       await db.runAsync('DELETE FROM route_points');
       await db.runAsync('DELETE FROM routes');
       await db.runAsync('DELETE FROM day_places');
