@@ -18,11 +18,16 @@ The speed-based classifier distinguishes walking, cycling, and generic
 motorized movement; it cannot reliably identify cars, buses, trains, or
 motorcycles. Manual corrections are stored with the GPS points.
 
-Location sampling uses balanced accuracy with a 50 m / 60 s minimum interval;
-the background task can defer batches, and iOS may pause updates while
-stationary. This reduces unnecessary work but cannot guarantee zero battery
-use or uninterrupted collection. The operating system, permissions, device
-settings, signal, and force-stop behavior remain authoritative.
+Location sampling uses balanced accuracy and requests periodic fixes every
+60 seconds without requiring a minimum distance, so stationary periods can be
+recorded as visits. Background fixes may be delivered in batches; iOS automatic
+pausing is disabled to keep stationary sampling active. These settings use more
+power than movement-only sampling and cannot guarantee zero battery use or
+uninterrupted collection. The operating system, permissions, device settings,
+signal, and force-stop behavior remain authoritative. Background location is
+optional during onboarding and can be granted later in Settings. Android 13+
+also offers a notification permission for the visible background-recording
+notification; denying it does not itself stop location recording.
 
 The route planner compares pedestrian routes by duration and distance and
 selects the fastest by default. City-wide air/weather values are not used to
@@ -89,12 +94,14 @@ supports deleting the local profile, routes, and diagnostic logs together.
 ```sh
 npx expo prebuild --platform android
 cd android
-./gradlew assembleRelease
+./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a
 ```
 
 The APK is written to
 `src/android/app/build/outputs/apk/release/app-release.apk` and includes its JS
-bundle, so it launches without Metro. The local generated release build uses
+bundle, so it launches without Metro. The command above builds an ARM64-only APK
+for modern Android phones; omit the architecture property for a universal APK.
+The local generated release build uses
 the development signing key and is for device testing only; sign with a
 production keystore before store distribution. `assembleDebug` is a Metro
 development build and is not the standalone APK.

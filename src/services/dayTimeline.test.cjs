@@ -97,6 +97,26 @@ test('marks a long location gap at the same coordinates as a likely stop', () =>
   assert.equal(events.some(event => event.kind === 'visit'), true);
 });
 
+test('records a 30-minute stationary interval even when GPS fixes are sparse', () => {
+  const points = [
+    point('before-stop', 0, 50, 19, 1.4),
+    {
+      ...point('after-stop', 30, 50, 19, 0),
+      timestamp: new Date('2026-10-29T08:30:00.000Z'),
+    },
+    {
+      ...point('after-stop-update', 31, 50.00001, 19, 0),
+      timestamp: new Date('2026-10-29T08:31:00.000Z'),
+    },
+  ];
+  const events = buildDayTimeline(points, []);
+  const visits = events.filter(event => event.kind === 'visit');
+
+  assert.equal(visits.length, 1);
+  assert.equal(visits[0].visit.startTime.toISOString(), '2026-10-29T08:00:00.000Z');
+  assert.equal(visits[0].visit.endTime.toISOString(), '2026-10-29T08:31:00.000Z');
+});
+
 test('does not count long location gaps as traveled distance or moving time', () => {
   const points = [
     point('a', 0, 50, 19, 2),

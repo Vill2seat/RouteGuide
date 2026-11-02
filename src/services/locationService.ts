@@ -57,10 +57,10 @@ async function startBackgroundTask(): Promise<void> {
   try {
     await Location.startLocationUpdatesAsync(locationTaskName, {
       accuracy: Location.Accuracy.Balanced,
-      distanceInterval: 50,
+      distanceInterval: 0,
       timeInterval: 60_000,
       deferredUpdatesInterval: 120_000,
-      pausesUpdatesAutomatically: true,
+      pausesUpdatesAutomatically: false,
       showsBackgroundLocationIndicator: true,
       foregroundService: {
         notificationTitle: 'Route Guide записывает маршрут',
@@ -82,7 +82,7 @@ async function startForegroundUpdates(): Promise<void> {
     foregroundSubscription = await Location.watchPositionAsync(
       {
         accuracy: Location.Accuracy.Balanced,
-        distanceInterval: 50,
+        distanceInterval: 0,
         timeInterval: 60_000,
       },
       location => {
@@ -160,7 +160,12 @@ async function startLocationUpdates(): Promise<void> {
   if (hasBackgroundPermission) {
     try {
       await startBackgroundTask();
-      await stopForegroundUpdates();
+      try {
+        await stopForegroundUpdates();
+      } catch (stopError) {
+        console.warn('Could not stop foreground updates after background task:', stopError);
+        await recordDiagnostic('warning', 'Could not stop foreground updates after background task');
+      }
       return;
     } catch (backgroundError) {
       console.error(
@@ -178,18 +183,21 @@ async function startLocationUpdates(): Promise<void> {
     await stopBackgroundUpdates();
   } catch (error) {
     console.error('Could not stop background updates before foreground fallback:', error);
-    await recordDiagnostic(
-      'error',
-      `Could not stop background updates before foreground fallback: ${describeError(error)}`
-    );
+    await recordDiagnostic('warning', 'Could not stop background updates before foreground fallback');
+  }
+
+  try {
+    await startForegroundUpdates();
+  } catch (error) {
+    console.error('Could not start foreground location updates:', error);
+    await recordDiagnostic('error', 'Could not start foreground location updates');
     throw error;
   }
 
   await recordDiagnostic(
     'warning',
-    'Background location permission not granted; using foreground location updates'
+    'Using foreground location updates'
   );
-  await startForegroundUpdates();
 }
 
 export async function startLocationTask(): Promise<void> {

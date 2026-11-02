@@ -56,23 +56,14 @@ export default function RoutePlannerScreen() {
     destinationLat !== undefined &&
     destinationLon !== undefined &&
     context !== 'recalculated';
-  const coordinateEndpoints =
-    originLat !== undefined &&
-    originLon !== undefined &&
-    destinationLat !== undefined &&
-    destinationLon !== undefined;
   const [useHistoryEndpoints, setUseHistoryEndpoints] = useState(historyStart);
   const [origin, setOrigin] = useState(
-    historyStart
-      ? 'Начало прогулки'
-      : context === 'recalculated'
-        ? 'Мое местоположение'
-        : OWN_LOCATION
+    historyStart ? 'Начало прогулки' : ''
   );
   const [destination, setDestination] = useState(
-    coordinateEndpoints ? (historyStart ? 'Конец прогулки' : 'Пункт назначения') : ''
+    historyStart ? 'Конец прогулки' : ''
   );
-  const [useCoordinateEndpoints, setUseCoordinateEndpoints] = useState(coordinateEndpoints);
+  const [useCoordinateEndpoints, setUseCoordinateEndpoints] = useState(historyStart);
   const [locationDisclosureAccepted, setLocationDisclosureAccepted] = useState(false);
   const [loading, setLoading] = useState(false);
   const [conditionsLoading, setConditionsLoading] = useState(false);
@@ -170,7 +161,10 @@ export default function RoutePlannerScreen() {
   }
 
   async function findRoutes() {
-    if (!destination.trim()) {
+    if (
+      !destination.trim() &&
+      !(context === 'recalculated' && destinationLat !== undefined && destinationLon !== undefined)
+    ) {
       Alert.alert('Укажите пункт назначения', 'Введите адрес или название места.');
       return;
     }
@@ -204,10 +198,16 @@ export default function RoutePlannerScreen() {
         : await Promise.all([
             resolveAddress(
               origin,
-              origin.trim().toLocaleLowerCase('ru-RU') ===
-                OWN_LOCATION.toLocaleLowerCase('ru-RU')
+              !origin.trim() ||
+                origin.trim().toLocaleLowerCase('ru-RU').replaceAll('ё', 'е') ===
+                  OWN_LOCATION.toLocaleLowerCase('ru-RU').replaceAll('ё', 'е')
             ),
-            resolveAddress(destination, false),
+            destination.trim()
+              ? resolveAddress(destination, false)
+              : Promise.resolve({
+                  latitude: Number(destinationLat),
+                  longitude: Number(destinationLon),
+                }),
           ]);
       const [start, end] = startAndEnd;
       // Валидируем координаты перед запросом к сервису маршрутов — невалидные координаты вызывают вылет
@@ -283,8 +283,11 @@ export default function RoutePlannerScreen() {
           accessibilityLabel="Начальная точка"
           value={origin}
           editable={!useHistoryEndpoints}
-          onChangeText={setOrigin}
-          placeholder="Адрес или «Мое местоположение»"
+          onChangeText={value => {
+            setOrigin(value);
+            setUseCoordinateEndpoints(false);
+          }}
+          placeholder="Моё местоположение или адрес"
           style={styles.input}
         />
         <Text style={styles.label}>Куда</Text>
@@ -292,17 +295,25 @@ export default function RoutePlannerScreen() {
           accessibilityLabel="Пункт назначения"
           value={destination}
           editable={!useHistoryEndpoints}
-          onChangeText={setDestination}
+          onChangeText={value => {
+            setDestination(value);
+            setUseCoordinateEndpoints(false);
+          }}
           placeholder="Адрес или название места"
           style={styles.input}
         />
+        {context === 'recalculated' && !destination.trim() && (
+          <Text style={styles.savedDestinationHint}>
+            Пустое поле оставит точку назначения исходного маршрута.
+          </Text>
+        )}
         {useHistoryEndpoints && (
           <TouchableOpacity
             accessibilityRole="button"
             onPress={() => {
               setUseHistoryEndpoints(false);
               setUseCoordinateEndpoints(false);
-              setOrigin(OWN_LOCATION);
+              setOrigin('');
               setDestination('');
               setCandidates([]);
               selectRoute(null);
@@ -455,6 +466,13 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     marginBottom: 12,
     color: '#25342B',
+  },
+  savedDestinationHint: {
+    color: '#66736B',
+    fontSize: 12,
+    lineHeight: 18,
+    marginTop: -4,
+    marginBottom: 8,
   },
   changeEndpoints: { alignSelf: 'flex-start', paddingVertical: 4, marginTop: -7 },
   changeEndpointsText: { color: '#23644F', fontSize: 12, fontWeight: '600' },

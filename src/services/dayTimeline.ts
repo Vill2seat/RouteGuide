@@ -127,7 +127,25 @@ function findStops(points: RoutePoint[]): StopRun[] {
       points[end].timestamp.getTime() - points[start].timestamp.getTime() >=
         stopMinimumDurationMs
     ) {
-      stops.push({ start, end });
+      const previousStop = stops[stops.length - 1];
+      const adjacentToPrevious =
+        previousStop !== undefined &&
+        start <= previousStop.end + 1 &&
+        start >= previousStop.end &&
+        points[start].timestamp.getTime() -
+          points[previousStop.end].timestamp.getTime() <=
+          stopMaximumGapMs &&
+        distanceMeters(
+          points[start].latitude,
+          points[start].longitude,
+          points[previousStop.end].latitude,
+          points[previousStop.end].longitude
+        ) <= stopRadiusMeters;
+      if (adjacentToPrevious) {
+        previousStop.end = Math.max(previousStop.end, end);
+      } else {
+        stops.push({ start, end });
+      }
     }
     start = -1;
     anchor = null;
@@ -155,13 +173,26 @@ function findStops(points: RoutePoint[]): StopRun[] {
         gap > 0 &&
         gap <= stopMaximumGapMs &&
         previousDistance <= stopRadiusMeters));
+    const previousStop = stops[stops.length - 1];
+    if (
+      start < 0 &&
+      previousStop?.end === index - 1 &&
+      point.accuracy <= 100 &&
+      gap > 0 &&
+      gap <= stopMaximumGapMs &&
+      previousDistance <= stopRadiusMeters &&
+      (speed === null || speed < 0.7)
+    ) {
+      previousStop.end = index;
+      previous = point;
+      continue;
+    }
     if (
       start < 0 &&
       previous !== null &&
       previous.accuracy <= 100 &&
       point.accuracy <= 100 &&
       gap >= stopMinimumDurationMs &&
-      gap <= stopMaximumGapMs &&
       previousDistance <= stopRadiusMeters
     ) {
       const previousStop = stops[stops.length - 1];

@@ -20,6 +20,7 @@ let backgroundPermission = { status: 'denied' };
 let locationCallback;
 let watcherStarted = 0;
 let watcherRemoved = 0;
+let foregroundLocationOptions = null;
 let backgroundTaskStarted = false;
 let backgroundStartCount = 0;
 let backgroundStopCount = 0;
@@ -36,8 +37,9 @@ const locationMock = {
   getForegroundPermissionsAsync: async () => foregroundPermission,
   requestForegroundPermissionsAsync: async () => foregroundPermission,
   getBackgroundPermissionsAsync: async () => backgroundPermission,
-  watchPositionAsync: async (_options, callback) => {
+  watchPositionAsync: async (options, callback) => {
     watcherStarted += 1;
+    foregroundLocationOptions = options;
     locationCallback = callback;
     return { remove: () => { watcherRemoved += 1; } };
   },
@@ -99,6 +101,8 @@ test('foreground-only permission starts a watcher and saves location updates', a
   await service.startLocationTask();
 
   assert.equal(watcherStarted, 1);
+  assert.equal(foregroundLocationOptions.distanceInterval, 0);
+  assert.equal(foregroundLocationOptions.timeInterval, 60_000);
   assert.equal(typeof locationCallback, 'function');
 
   const location = {
@@ -151,9 +155,9 @@ test('background permission starts and stops the native location task', async ()
   assert.equal(backgroundTaskStarted, true);
   assert.equal(backgroundStartCount, 1);
   assert.equal(watcherStarted, 2);
-  assert.equal(backgroundLocationOptions.distanceInterval, 50);
+  assert.equal(backgroundLocationOptions.distanceInterval, 0);
   assert.equal(backgroundLocationOptions.timeInterval, 60_000);
-  assert.equal(backgroundLocationOptions.pausesUpdatesAutomatically, true);
+  assert.equal(backgroundLocationOptions.pausesUpdatesAutomatically, false);
   assert.equal(backgroundLocationOptions.deferredUpdatesInterval, 120_000);
 
   await service.stopLocationTask();

@@ -44,7 +44,7 @@ export default function Onboarding() {
     },
     {
       title: 'Фоновая запись',
-      text: 'После разрешения геолокации автоматическая запись включается по умолчанию. Разрешение «Всегда» позволит продолжать запись при заблокированном экране; без него запись работает, пока приложение открыто.',
+      text: 'После разрешения геолокации автоматическая запись включается по умолчанию. Разрешение «Всегда» можно включить позже в настройках приложения, чтобы запись продолжалась при заблокированном экране.',
     },
     {
       title: 'Конфиденциальность',
@@ -71,14 +71,6 @@ export default function Onboarding() {
         return;
       }
 
-      const background = await Location.requestBackgroundPermissionsAsync();
-      if (background.status !== 'granted') {
-        await recordDiagnostic('warning', 'Background location permission was denied');
-        Alert.alert(
-          'Запись в фоне отключена',
-          'Автоматическая запись включится при открытом приложении. Чтобы продолжать запись при заблокированном экране, разрешите геолокацию «Всегда» в настройках устройства.'
-        );
-      }
       router.replace('/');
     } catch (error) {
       console.error('Could not request location permissions:', error);

@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react';
 import {
+  AppState,
   Alert,
   Linking,
+  PermissionsAndroid,
+  Platform,
   Share,
   ScrollView,
   StatusBar,
@@ -18,6 +21,9 @@ import { SQLiteDB, type DiagnosticLog } from '@services/database';
 import {
   disableAutomaticRecording,
   enableAutomaticRecording,
+  ensureAutomaticRecording,
+  getLocationRecordingMode,
+  type LocationRecordingMode,
 } from '@services/locationService';
 import {
   clearDiagnostics,
@@ -30,6 +36,10 @@ export default function SettingsScreen() {
   const [busy, setBusy] = useState(false);
   const [profileName, setProfileName] = useState('');
   const [recordingEnabled, setRecordingEnabled] = useState(true);
+  const [recordingMode, setRecordingMode] = useState<LocationRecordingMode | null>(null);
+  const [notificationPermissionGranted, setNotificationPermissionGranted] = useState<
+    boolean | null
+  >(null);
   const [diagnosticLogs, setDiagnosticLogs] = useState<DiagnosticLog[]>([]);
 
   useEffect(() => {
@@ -51,6 +61,46 @@ export default function SettingsScreen() {
         console.error('Could not load local diagnostics:', error);
         void recordDiagnostic('error', 'Could not load local diagnostics');
       });
+
+    let active = true;
+    let previousState = AppState.currentState;
+    const refreshSystemState = async () => {
+      try {
+        const [enabled, foreground] = await Promise.all([
+          SQLiteDB.isAutomaticRecordingEnabled(),
+          Location.getForegroundPermissionsAsync(),
+        ]);
+        let notificationsGranted: boolean | null = null;
+        if (Platform.OS === 'android' && Number(Platform.Version) >= 33) {
+          notificationsGranted = await PermissionsAndroid.check(
+            PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS
+          );
+        }
+        let mode: LocationRecordingMode | null = null;
+        if (enabled && foreground.status === 'granted') {
+          const started = await ensureAutomaticRecording();
+          if (started) mode = await getLocationRecordingMode();
+        }
+        if (!active) return;
+        setRecordingEnabled(enabled);
+        setRecordingMode(mode);
+        setNotificationPermissionGranted(notificationsGranted);
+      } catch (error) {
+        console.error('Could not refresh recording state after returning to Route Guide:', error);
+        void recordDiagnostic('error', 'Could not refresh recording state after system settings');
+      }
+    };
+    void refreshSystemState();
+    const appStateSubscription = AppState.addEventListener('change', state => {
+      if (state === 'active' && previousState !== 'active') {
+        void refreshSystemState();
+      }
+      previousState = state;
+    });
+    return () => {
+      active = false;
+      appStateSubscription.remove();
+    };
   }, []);
 
   async function saveProfile() {
@@ -74,9 +124,11 @@ export default function SettingsScreen() {
       if (recordingEnabled) {
         await disableAutomaticRecording();
         setRecordingEnabled(false);
+        setRecordingMode(null);
       } else {
         await enableAutomaticRecording();
         setRecordingEnabled(true);
+        setRecordingMode(await getLocationRecordingMode());
       }
     } catch (error) {
       console.error('Could not update automatic recording:', error);
@@ -85,12 +137,52 @@ export default function SettingsScreen() {
         'Ошибка записи',
         error instanceof Error ? error.message : 'Не удалось изменить настройку записи.'
       );
+      setRecordingMode(null);
     } finally {
       setBusy(false);
     }
   }
 
+  async function requestNotificationPermission() {
+    if (Platform.OS !== 'android' || Number(Platform.Version) < 33) return;
+    setBusy(true);
+    try {
+      const result = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS
+      );
+      const granted = result === PermissionsAndroid.RESULTS.GRANTED;
+      setNotificationPermissionGranted(granted);
+      if (!granted) {
+        Alert.alert(
+          'Уведомления выключены',
+          'Запись маршрута продолжит работать, но системное уведомление о фоновой записи может быть скрыто.',
+          [
+            { text: 'Позже', style: 'cancel' },
+            { text: 'Настройки приложения', onPress: () => void openAppSettings() },
+          ]
+        );
+      }
+    } catch (error) {
+      console.error('Could not request notification permission:', error);
+      void recordDiagnostic('error', 'Could not request Android notification permission');
+      Alert.alert('Ошибка', 'Не удалось запросить разрешение на уведомления.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openAppSettings() {
+    try {
+      await Linking.openSettings();
+    } catch (error) {
+      console.error('Could not open application settings:', error);
+      void recordDiagnostic('error', 'Could not open Android application settings');
+      Alert.alert('Ошибка', 'Не удалось открыть настройки приложения.');
+    }
+  }
+
   async function requestBackgroundPermission() {
+    setBusy(true);
     try {
       const foreground = await Location.getForegroundPermissionsAsync();
       if (foreground.status !== 'granted') {
@@ -108,12 +200,14 @@ export default function SettingsScreen() {
           'Разрешение можно изменить в настройках устройства.',
           [
             { text: 'Позже', style: 'cancel' },
-            { text: 'Открыть настройки', onPress: () => Linking.openSettings() },
+            { text: 'Открыть настройки', onPress: () => void openAppSettings() },
           ]
         );
       } else {
-        if (recordingEnabled) {
+        const enabled = await SQLiteDB.isAutomaticRecordingEnabled();
+        if (enabled) {
           await enableAutomaticRecording();
+          setRecordingMode(await getLocationRecordingMode());
         }
         Alert.alert(
           'Готово',
@@ -124,6 +218,8 @@ export default function SettingsScreen() {
       console.error('Could not request background location:', error);
       await recordDiagnostic('error', 'Could not request background location permission');
       Alert.alert('Ошибка', 'Не удалось запросить разрешение геолокации.');
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -292,8 +388,26 @@ export default function SettingsScreen() {
             {recordingEnabled ? 'Выключить' : 'Включить'}
           </Text>
         </TouchableOpacity>
+        {Platform.OS === 'android' && Number(Platform.Version) >= 33 && (
+          <TouchableOpacity
+            accessibilityRole="button"
+            disabled={busy}
+            style={styles.row}
+            onPress={requestNotificationPermission}
+          >
+            <Text style={styles.rowTitle}>Разрешить уведомления записи</Text>
+            <Text style={styles.rowAction}>
+              {notificationPermissionGranted === null
+                ? 'Проверка…'
+                : notificationPermissionGranted
+                  ? 'Разрешены'
+                  : 'Включить'}
+            </Text>
+          </TouchableOpacity>
+        )}
         <TouchableOpacity
           accessibilityRole="button"
+          disabled={busy}
           style={styles.row}
           onPress={requestBackgroundPermission}
         >
@@ -301,7 +415,16 @@ export default function SettingsScreen() {
           <Text style={styles.rowAction}>Открыть</Text>
         </TouchableOpacity>
         <Text style={styles.note}>
-            По умолчанию запись запускается после разрешения геолокации. Интервалы GPS увеличены для экономии энергии; ОС может приостанавливать фоновые обновления. Если разрешена геолокация только при использовании приложения, запись продолжается только пока приложение открыто.
+            По умолчанию запись запускается после разрешения геолокации. Периодические сбалансированные GPS-фиксации позволяют отмечать остановки и без перемещения; ОС всё равно может ограничивать обновления. Если разрешена геолокация только при использовании приложения, запись продолжается только пока приложение открыто.
+        </Text>
+        <Text style={styles.note}>
+          Режим записи: {recordingMode === 'background'
+            ? 'в фоне'
+            : recordingMode === 'foreground'
+              ? 'только при открытом приложении'
+              : recordingEnabled
+                ? 'не запущен — откройте приложение и проверьте разрешение'
+                : 'выключен'}
         </Text>
       </View>
 
