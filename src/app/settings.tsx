@@ -40,6 +40,9 @@ export default function SettingsScreen() {
   const [notificationPermissionGranted, setNotificationPermissionGranted] = useState<
     boolean | null
   >(null);
+  const [backgroundPermissionGranted, setBackgroundPermissionGranted] = useState<
+    boolean | null
+  >(null);
   const [diagnosticLogs, setDiagnosticLogs] = useState<DiagnosticLog[]>([]);
 
   useEffect(() => {
@@ -66,9 +69,10 @@ export default function SettingsScreen() {
     let previousState = AppState.currentState;
     const refreshSystemState = async () => {
       try {
-        const [enabled, foreground] = await Promise.all([
+        const [enabled, foreground, background] = await Promise.all([
           SQLiteDB.isAutomaticRecordingEnabled(),
           Location.getForegroundPermissionsAsync(),
+          Location.getBackgroundPermissionsAsync(),
         ]);
         let notificationsGranted: boolean | null = null;
         if (Platform.OS === 'android' && Number(Platform.Version) >= 33) {
@@ -85,6 +89,7 @@ export default function SettingsScreen() {
         setRecordingEnabled(enabled);
         setRecordingMode(mode);
         setNotificationPermissionGranted(notificationsGranted);
+        setBackgroundPermissionGranted(background.status === 'granted');
       } catch (error) {
         console.error('Could not refresh recording state after returning to Route Guide:', error);
         void recordDiagnostic('error', 'Could not refresh recording state after system settings');
@@ -194,6 +199,7 @@ export default function SettingsScreen() {
       }
 
       const background = await Location.requestBackgroundPermissionsAsync();
+      setBackgroundPermissionGranted(background.status === 'granted');
       if (background.status !== 'granted') {
         Alert.alert(
           'Фоновая геолокация не разрешена',
@@ -407,15 +413,22 @@ export default function SettingsScreen() {
         )}
         <TouchableOpacity
           accessibilityRole="button"
+          accessibilityState={{ disabled: busy }}
           disabled={busy}
           style={styles.row}
           onPress={requestBackgroundPermission}
         >
           <Text style={styles.rowTitle}>Разрешить фоновую геолокацию</Text>
-          <Text style={styles.rowAction}>Открыть</Text>
+          <Text style={styles.rowAction}>
+            {backgroundPermissionGranted === null
+              ? 'Проверка…'
+              : backgroundPermissionGranted
+                ? 'Разрешена'
+                : 'Включить'}
+          </Text>
         </TouchableOpacity>
         <Text style={styles.note}>
-            По умолчанию запись запускается после разрешения геолокации. Периодические сбалансированные GPS-фиксации позволяют отмечать остановки и без перемещения; ОС всё равно может ограничивать обновления. Если разрешена геолокация только при использовании приложения, запись продолжается только пока приложение открыто.
+          Для записи прогулки в фоне нужны автоматическая запись и разрешение геолокации «Всегда». GPS-точки запрашиваются примерно раз в 30 секунд; система может менять интервал и ограничивать работу приложения.
         </Text>
         <Text style={styles.note}>
           Режим записи: {recordingMode === 'background'

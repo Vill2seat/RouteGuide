@@ -31,9 +31,11 @@ let routeId = null;
 let createdRoutes = 0;
 let automaticRecordingEnabled = true;
 let finishedRoutes = 0;
+let backgroundTaskCallback;
 
 const locationMock = {
-  Accuracy: { Balanced: 3 },
+  Accuracy: { Balanced: 3, High: 4 },
+  ActivityType: { Fitness: 3 },
   getForegroundPermissionsAsync: async () => foregroundPermission,
   requestForegroundPermissionsAsync: async () => foregroundPermission,
   getBackgroundPermissionsAsync: async () => backgroundPermission,
@@ -57,8 +59,10 @@ const locationMock = {
   },
 };
 const taskManagerMock = {
-  isTaskDefined: () => true,
-  defineTask: () => {},
+  isTaskDefined: () => false,
+  defineTask: (_taskName, callback) => {
+    backgroundTaskCallback = callback;
+  },
 };
 const databaseMock = {
   appendLocations: async locations => appendedLocations.push(...locations),
@@ -96,13 +100,30 @@ vm.runInNewContext(javascript, {
 
 const service = loadedModule.exports;
 
+test('background task persists delivered GPS locations', async () => {
+  const location = {
+    timestamp: Date.now(),
+    coords: {
+      latitude: 55.7558,
+      longitude: 37.6173,
+      altitude: null,
+      accuracy: 10,
+      speed: 1.2,
+      heading: null,
+    },
+  };
+  await backgroundTaskCallback({ data: { locations: [location] }, error: null });
+  assert.equal(appendedLocations.at(-1), location);
+});
+
 test('foreground-only permission starts a watcher and saves location updates', async () => {
   await service.startLocationTask();
   await service.startLocationTask();
 
   assert.equal(watcherStarted, 1);
   assert.equal(foregroundLocationOptions.distanceInterval, 0);
-  assert.equal(foregroundLocationOptions.timeInterval, 60_000);
+  assert.equal(foregroundLocationOptions.accuracy, locationMock.Accuracy.High);
+  assert.equal(foregroundLocationOptions.timeInterval, 30_000);
   assert.equal(typeof locationCallback, 'function');
 
   const location = {
@@ -119,7 +140,7 @@ test('foreground-only permission starts a watcher and saves location updates', a
   locationCallback(location);
   await new Promise(resolve => setImmediate(resolve));
 
-  assert.equal(appendedLocations[0], location);
+  assert.equal(appendedLocations.at(-1), location);
   await service.stopLocationTask();
   assert.equal(watcherRemoved, 1);
 });
@@ -156,9 +177,12 @@ test('background permission starts and stops the native location task', async ()
   assert.equal(backgroundStartCount, 1);
   assert.equal(watcherStarted, 2);
   assert.equal(backgroundLocationOptions.distanceInterval, 0);
-  assert.equal(backgroundLocationOptions.timeInterval, 60_000);
+  assert.equal(backgroundLocationOptions.accuracy, locationMock.Accuracy.High);
+  assert.equal(backgroundLocationOptions.timeInterval, 30_000);
   assert.equal(backgroundLocationOptions.pausesUpdatesAutomatically, false);
-  assert.equal(backgroundLocationOptions.deferredUpdatesInterval, 120_000);
+  assert.equal(backgroundLocationOptions.deferredUpdatesInterval, 0);
+  assert.equal(backgroundLocationOptions.activityType, locationMock.ActivityType.Fitness);
+  assert.equal(backgroundLocationOptions.foregroundService.killServiceOnDestroy, false);
 
   await service.stopLocationTask();
   assert.equal(backgroundTaskStarted, false);

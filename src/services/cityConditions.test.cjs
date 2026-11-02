@@ -11,11 +11,13 @@ const javascript = ts.transpile(source, {
   target: ts.ScriptTarget.ES2020,
 });
 const requestedUrls = [];
+let failWeatherFetch = false;
 const now = new Date();
 const currentHour = `${now.toISOString().slice(0, 13)}:00`;
 const fetchMock = async url => {
   requestedUrls.push(String(url));
   const isAir = String(url).includes('air-quality');
+  if (!isAir && failWeatherFetch) throw new Error('Temporary weather API failure');
   return {
     ok: true,
     json: async () =>
@@ -108,6 +110,21 @@ test('does not reuse cached weather across different rounded locations', async (
   assert.ok(requestedUrls.slice(-2).every(url => url.includes('latitude=50.1')));
   assert.ok(requestedUrls.slice(-2).every(url => url.includes('longitude=19.2')));
   assert.equal(result.windDirection.value, 270);
+});
+
+test('retries weather immediately when the cached response contains only air quality', async () => {
+  const location = { latitude: 51.04, longitude: 20.06 };
+  failWeatherFetch = true;
+  const firstAttempt = await getCityConditions(location);
+  assert.equal(firstAttempt.pm25.value, 12);
+  assert.equal(firstAttempt.temperature.value, null);
+
+  failWeatherFetch = false;
+  const beforeRetry = requestedUrls.length;
+  const retry = await getCityConditions(location);
+  assert.equal(requestedUrls.length, beforeRetry + 2);
+  assert.equal(retry.temperature.value, 14);
+  assert.equal(retry.weatherCode, 61);
 });
 
 test('uses the direction the wind travels toward, not the meteorological from direction', () => {

@@ -42,6 +42,15 @@ conditions. Weather requests are refreshed on opening the screen and at most
 every 30 minutes while it remains active; the upstream models may update less
 often. The map overlay is a local-area forecast, not a city-wide radar or
 street-level weather measurement. It does not change route recommendations.
+If the weather provider is temporarily unavailable, the home screen shows that
+state explicitly, offers a retry action, and retries incomplete weather data
+after two minutes rather than keeping an empty cached result for 30 minutes.
+Background route recording uses the platform location task and an Android
+foreground service, requests high-accuracy fixes about every 30 seconds, and
+does not defer delivery while the app is backgrounded. Reliable background
+recording requires the system's "Always" location permission; mobile operating
+systems and device vendors can still stop background work, so it cannot promise
+the same low-power step history as a dedicated step-counter service.
 
 The mobile screens follow the five-screen design in
 `docs/design/figma/Untitled.pdf`: a live local day map, calendar-based history,

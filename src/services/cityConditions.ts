@@ -224,7 +224,18 @@ export async function getCityConditions(location: Coordinate): Promise<CityCondi
   const longitude = roundedCityCoordinate(location.longitude);
   const cacheKey = `${latitude},${longitude}`;
   const cached = cache.get(cacheKey);
-  if (cached && Date.now() - cached.fetchedAt < cacheDurationMs) return cached.value;
+  const cachedWeatherIsAvailable = Boolean(
+    cached &&
+      cached.value.temperature.value !== null &&
+      cached.value.weatherCode !== null
+  );
+  if (
+    cached &&
+    cachedWeatherIsAvailable &&
+    Date.now() - cached.fetchedAt < cacheDurationMs
+  ) {
+    return cached.value;
+  }
   const params = new URLSearchParams({
     latitude: String(latitude),
     longitude: String(longitude),
@@ -252,6 +263,12 @@ export async function getCityConditions(location: Coordinate): Promise<CityCondi
     results[1].status === 'fulfilled'
       ? results[1].value
       : null;
+  if (results[0].status === 'rejected') {
+    console.warn('Open-Meteo air-quality request failed:', results[0].reason);
+  }
+  if (results[1].status === 'rejected') {
+    console.warn('Open-Meteo weather request failed:', results[1].reason);
+  }
   const cachedTemperature =
     results[1].status === 'rejected' && cached
       ? cached.value.temperature

@@ -25,6 +25,7 @@
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
         "ACCESS_BACKGROUND_LOCATION",
+        "RECEIVE_BOOT_COMPLETED",
         "FOREGROUND_SERVICE",
         "FOREGROUND_SERVICE_LOCATION",
         "POST_NOTIFICATIONS"
@@ -38,7 +39,10 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "Route Guide needs access to your location even when the app is closed to record your routes."
+          "locationAlwaysAndWhenInUsePermission": "Route Guide needs access to your location even when the app is closed to record your routes.",
+          "isIosBackgroundLocationEnabled": true,
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true
         }
       ],
       "expo-task-manager",

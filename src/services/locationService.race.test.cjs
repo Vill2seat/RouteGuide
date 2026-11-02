@@ -24,7 +24,8 @@ let startLocationResolve;
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 const locationMock = {
-  Accuracy: { Balanced: 3 },
+  Accuracy: { Balanced: 3, High: 4 },
+  ActivityType: { Fitness: 3 },
   getForegroundPermissionsAsync: async () => foregroundPermission,
   requestForegroundPermissionsAsync: async () => foregroundPermission,
   getBackgroundPermissionsAsync: async () => backgroundPermission,

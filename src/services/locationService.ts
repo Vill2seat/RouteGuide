@@ -56,16 +56,18 @@ async function startBackgroundTask(): Promise<void> {
 
   try {
     await Location.startLocationUpdatesAsync(locationTaskName, {
-      accuracy: Location.Accuracy.Balanced,
+      accuracy: Location.Accuracy.High,
       distanceInterval: 0,
-      timeInterval: 60_000,
-      deferredUpdatesInterval: 120_000,
+      timeInterval: 30_000,
+      deferredUpdatesInterval: 0,
       pausesUpdatesAutomatically: false,
       showsBackgroundLocationIndicator: true,
+      activityType: Location.ActivityType.Fitness,
       foregroundService: {
         notificationTitle: 'Route Guide записывает маршрут',
         notificationBody: 'Нажмите, чтобы открыть приложение и остановить запись.',
         notificationColor: '#168A57',
+        killServiceOnDestroy: false,
       },
     });
   } catch (error) {
@@ -81,9 +83,9 @@ async function startForegroundUpdates(): Promise<void> {
   try {
     foregroundSubscription = await Location.watchPositionAsync(
       {
-        accuracy: Location.Accuracy.Balanced,
+        accuracy: Location.Accuracy.High,
         distanceInterval: 0,
-        timeInterval: 60_000,
+        timeInterval: 30_000,
       },
       location => {
         void SQLiteDB.appendLocations([location]).catch(error => {

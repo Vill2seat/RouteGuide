@@ -75,6 +75,7 @@ export default function HomeScreen() {
   const weatherRequestId = useRef(0);
   const weatherRefreshPromise = useRef<Promise<void> | null>(null);
   const weatherLastAttemptAt = useRef(0);
+  const weatherRetryDelayMs = useRef(30 * 60 * 1000);
 
   const refreshDay = useCallback(async () => {
     const [enabled, data] = await Promise.all([
@@ -130,10 +131,16 @@ export default function HomeScreen() {
 
         setMapFocus(coordinate);
         const conditions = await getCityConditions(coordinate);
-        if (requestId === weatherRequestId.current) setCityConditions(conditions);
+        if (requestId === weatherRequestId.current) {
+          setCityConditions(conditions);
+          const hasWeather =
+            conditions.temperature.value !== null && conditions.weatherCode !== null;
+          weatherRetryDelayMs.current = hasWeather ? 30 * 60 * 1000 : 2 * 60 * 1000;
+        }
       } catch (error) {
         console.warn('Could not load current-location weather:', error);
         void recordDiagnostic('warning', 'Weather unavailable for current location');
+        weatherRetryDelayMs.current = 2 * 60 * 1000;
       } finally {
         if (requestId === weatherRequestId.current) setConditionsLoading(false);
       }
@@ -154,8 +161,6 @@ export default function HomeScreen() {
       let active = true;
       const loadHome = async () => {
         setLoading(true);
-        setCityConditions(null);
-        setConditionsLoading(false);
         try {
           const [profile, permission] = await Promise.all([
             SQLiteDB.getLocalProfile(),
@@ -175,7 +180,6 @@ export default function HomeScreen() {
           await refreshDay();
           if (!active) return;
 
-          setCityConditions(null);
           void refreshWeather();
         } catch (error) {
           if (!active) return;
@@ -196,7 +200,7 @@ export default function HomeScreen() {
 
       const interval = setInterval(() => {
         if (active && AppState.currentState === 'active') {
-          if (Date.now() - weatherLastAttemptAt.current >= 30 * 60 * 1000) {
+          if (Date.now() - weatherLastAttemptAt.current >= weatherRetryDelayMs.current) {
             void refreshWeather();
           }
           Promise.all([refreshDay(), refreshRecordingStatus()])
@@ -277,6 +281,21 @@ export default function HomeScreen() {
         cityConditions.windDirection.stale,
     };
   }, [cityConditions, mapFocus]);
+  const weatherDescription = cityConditions
+    ? getWeatherDescription(cityConditions.weatherCode, cityConditions.precipitation.value)
+    : null;
+  const hasCurrentWeather = Boolean(
+    cityConditions &&
+      cityConditions.temperature.value !== null &&
+      cityConditions.weatherCode !== null
+  );
+  const currentWeatherText =
+    cityConditions &&
+    cityConditions.temperature.value !== null &&
+    cityConditions.weatherCode !== null &&
+    weatherDescription
+      ? `${weatherDescription.label} · ${Math.round(cityConditions.temperature.value)} °C`
+      : 'сейчас нет ответа от источника';
   const mapHeight = Math.min(380, Math.max(230, windowHeight * 0.38));
   const visitCount = events.filter(event => event.kind === 'visit').length;
   const lastWalkingTrip = [...events]
@@ -491,6 +510,7 @@ export default function HomeScreen() {
           coordinates={mapCoordinates}
           cameraTarget={mapFocus}
           currentLocation={mapFocus}
+          weatherOverlay={weatherOverlay}
           visitMarkers={visitMarkers}
           onVisitPress={id => {
             const visit = events.find(
@@ -683,7 +703,7 @@ export default function HomeScreen() {
                     unit={cityConditions.pm25.unit}
                   />
                   <ConditionValue
-                    label="Погода"
+                    label="Темп."
                     value={cityConditions.temperature.value}
                     unit={cityConditions.temperature.unit}
                   />
@@ -698,6 +718,18 @@ export default function HomeScreen() {
                     unit={cityConditions.precipitation.unit}
                   />
                 </View>
+                <Text style={styles.conditionSource}>
+                  Погода: {currentWeatherText}
+                  {!hasCurrentWeather && conditionsLoading ? ' · повторяем запрос' : ''}
+                </Text>
+                {!hasCurrentWeather && !conditionsLoading && (
+                  <TouchableOpacity
+                    accessibilityRole="button"
+                    onPress={() => void refreshWeather()}
+                  >
+                    <Text style={styles.weatherRetry}>Повторить загрузку погоды</Text>
+                  </TouchableOpacity>
+                )}
                 <Text style={styles.conditionSource}>
                   {cityConditions.pm25.source}
                   {cityConditions.pm25.stale ? ' · сохранённые данные' : ''}
@@ -722,11 +754,21 @@ export default function HomeScreen() {
                 </Text>
               </>
             ) : (
-              <Text style={styles.conditionSource}>
-                {conditionsLoading
-                  ? 'Получаем данные Open-Meteo для района…'
-                  : 'Данные о воздухе и погоде пока недоступны'}
-              </Text>
+              <>
+                <Text style={styles.conditionSource}>
+                  {conditionsLoading
+                    ? 'Получаем данные Open-Meteo для района…'
+                    : 'Данные о воздухе и погоде пока недоступны'}
+                </Text>
+                {!conditionsLoading && (
+                  <TouchableOpacity
+                    accessibilityRole="button"
+                    onPress={() => void refreshWeather()}
+                  >
+                    <Text style={styles.weatherRetry}>Повторить загрузку</Text>
+                  </TouchableOpacity>
+                )}
+              </>
             )}
           </View>
 
@@ -993,6 +1035,7 @@ const styles = StyleSheet.create({
   conditionLabel: { color: '#849087', fontSize: 10 },
   conditionMetric: { color: '#314138', fontSize: 12, fontWeight: '600', marginTop: 4 },
   conditionSource: { color: '#849087', fontSize: 10, lineHeight: 15, marginTop: 10 },
+  weatherRetry: { color: '#23644F', fontSize: 11, fontWeight: '600', marginTop: 6 },
   trafficUnavailable: { color: '#849087', fontSize: 10, lineHeight: 15, marginTop: 3 },
   conditionsDisclaimer: { flexDirection: 'row', gap: 6, marginTop: 10 },
   infoIcon: { color: '#718078', fontSize: 12 },
