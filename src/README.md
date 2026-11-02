@@ -36,6 +36,12 @@ Noise analysis and live traffic are not enabled. The city conditions card uses
 Open-Meteo modelled PM2.5 and current weather for coordinates rounded to about
 11 km; values are not street-level measurements. Traffic is shown as
 unavailable until a suitable provider is selected.
+The home map also shows modelled weather for the current area, a wind arrow
+(pointing downwind), a sun azimuth ray, and current precipitation/weather
+conditions. Weather requests are refreshed on opening the screen and at most
+every 30 minutes while it remains active; the upstream models may update less
+often. The map overlay is a local-area forecast, not a city-wide radar or
+street-level weather measurement. It does not change route recommendations.
 
 The mobile screens follow the five-screen design in
 `docs/design/figma/Untitled.pdf`: a live local day map, calendar-based history,

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -37,7 +37,14 @@ import {
   type DayVisit,
   type DayTrip,
 } from '@services/dayTimeline';
-import { getCityConditions, type CityConditions } from '@services/cityConditions';
+import {
+  getCityConditions,
+  getCompassDirection,
+  getSunAzimuth,
+  getWeatherDescription,
+  getWindTravelBearing,
+  type CityConditions,
+} from '@services/cityConditions';
 import RouteMap from '@components/RouteMap';
 import DayTimeline from '@components/DayTimeline';
 import BottomNav from '@components/BottomNav';
@@ -45,7 +52,7 @@ import RouteIcon from '@assets/icons/route.svg';
 import WalkIcon from '@assets/icons/walk.svg';
 import useReducedMotion from '@hooks/useReducedMotion';
 import VisitSheet from '@components/VisitSheet';
-import { assertCoordinate } from '@services/routeService';
+import { assertCoordinate, type Coordinate } from '@services/routeService';
 
 export default function HomeScreen() {
   const router = useRouter();
@@ -65,6 +72,9 @@ export default function HomeScreen() {
   const [mapFocus, setMapFocus] = useState<{ latitude: number; longitude: number } | null>(null);
   const [locating, setLocating] = useState(false);
   const [selectedVisit, setSelectedVisit] = useState<DayVisit | null>(null);
+  const weatherRequestId = useRef(0);
+  const weatherRefreshPromise = useRef<Promise<void> | null>(null);
+  const weatherLastAttemptAt = useRef(0);
 
   const refreshDay = useCallback(async () => {
     const [enabled, data] = await Promise.all([
@@ -82,6 +92,61 @@ export default function HomeScreen() {
     const started = await ensureAutomaticRecording();
     const mode = started ? await getLocationRecordingMode() : null;
     return { enabled: true, mode };
+  }, []);
+
+  const refreshWeather = useCallback((coordinateOverride?: Coordinate): Promise<void> => {
+    if (weatherRefreshPromise.current && !coordinateOverride) {
+      return weatherRefreshPromise.current;
+    }
+    const requestId = ++weatherRequestId.current;
+    weatherLastAttemptAt.current = Date.now();
+    setConditionsLoading(true);
+
+    const request = (async () => {
+      try {
+        let coordinate = coordinateOverride;
+        if (!coordinate) {
+          const lastKnown = await Location.getLastKnownPositionAsync({
+            maxAge: 15 * 60 * 1000,
+            requiredAccuracy: 500,
+          });
+          if (lastKnown) {
+            coordinate = {
+              latitude: lastKnown.coords.latitude,
+              longitude: lastKnown.coords.longitude,
+            };
+          } else {
+            const current = await Location.getCurrentPositionAsync({
+              accuracy: Location.Accuracy.Balanced,
+            });
+            coordinate = {
+              latitude: current.coords.latitude,
+              longitude: current.coords.longitude,
+            };
+          }
+        }
+        assertCoordinate(coordinate);
+        if (requestId !== weatherRequestId.current) return;
+
+        setMapFocus(coordinate);
+        const conditions = await getCityConditions(coordinate);
+        if (requestId === weatherRequestId.current) setCityConditions(conditions);
+      } catch (error) {
+        console.warn('Could not load current-location weather:', error);
+        void recordDiagnostic('warning', 'Weather unavailable for current location');
+      } finally {
+        if (requestId === weatherRequestId.current) setConditionsLoading(false);
+      }
+    })();
+
+    let trackedRequest: Promise<void>;
+    trackedRequest = request.finally(() => {
+      if (weatherRefreshPromise.current === trackedRequest) {
+        weatherRefreshPromise.current = null;
+      }
+    });
+    weatherRefreshPromise.current = trackedRequest;
+    return trackedRequest;
   }, []);
 
   useFocusEffect(
@@ -107,28 +172,11 @@ export default function HomeScreen() {
           setRecordingEnabled(recording.enabled);
           setRecordingMode(recording.mode);
           setRecordingUnavailable(recording.enabled && recording.mode === null);
-          const data = await refreshDay();
+          await refreshDay();
           if (!active) return;
 
-          const latest = data.points[data.points.length - 1];
-          if (latest) {
-            setCityConditions(null);
-            setConditionsLoading(true);
-            getCityConditions({
-              latitude: latest.latitude,
-              longitude: latest.longitude,
-            })
-              .then(value => {
-                if (active) setCityConditions(value);
-              })
-              .catch(error => {
-                console.warn('City-level environmental data unavailable:', error);
-                void recordDiagnostic('warning', 'City-level conditions unavailable');
-              })
-              .finally(() => {
-                if (active) setConditionsLoading(false);
-              });
-          }
+          setCityConditions(null);
+          void refreshWeather();
         } catch (error) {
           if (!active) return;
           // Если база пустая (маршруты ещё не начинались) — не показываем ложный алерт.
@@ -148,6 +196,9 @@ export default function HomeScreen() {
 
       const interval = setInterval(() => {
         if (active && AppState.currentState === 'active') {
+          if (Date.now() - weatherLastAttemptAt.current >= 30 * 60 * 1000) {
+            void refreshWeather();
+          }
           Promise.all([refreshDay(), refreshRecordingStatus()])
             .then(([, recording]) => {
               if (!active) return;
@@ -166,7 +217,7 @@ export default function HomeScreen() {
         active = false;
         clearInterval(interval);
       };
-    }, [refreshDay, refreshRecordingStatus, router])
+    }, [refreshDay, refreshRecordingStatus, refreshWeather, router])
   );
 
   const points = snapshot?.points ?? [];
@@ -195,6 +246,37 @@ export default function HomeScreen() {
     },
     [events]
   );
+  const weatherOverlay = useMemo(() => {
+    if (!mapFocus || !cityConditions) return null;
+    const weather = getWeatherDescription(
+      cityConditions.weatherCode,
+      cityConditions.precipitation.value
+    );
+    const windBearing =
+      cityConditions.windSpeed.value !== null && cityConditions.windSpeed.value >= 1
+        ? getWindTravelBearing(cityConditions.windDirection.value)
+        : null;
+    const sunBearing = getSunAzimuth(new Date(), mapFocus.latitude, mapFocus.longitude);
+    return {
+      conditionLabel: weather.label,
+      conditionIcon: weather.icon,
+      temperature: cityConditions.temperature.value,
+      windSpeed: cityConditions.windSpeed.value,
+      windDirection: getCompassDirection(windBearing),
+      windBearing,
+      sunDirection: getCompassDirection(sunBearing),
+      sunBearing,
+      precipitation: cityConditions.precipitation.value,
+      precipitationProbability: cityConditions.precipitationProbability,
+      cloudCover: cityConditions.cloudCover,
+      fetchedAt: cityConditions.fetchedAt,
+      modelTime: cityConditions.temperature.updatedAt,
+      stale:
+        cityConditions.temperature.stale ||
+        cityConditions.windSpeed.stale ||
+        cityConditions.windDirection.stale,
+    };
+  }, [cityConditions, mapFocus]);
   const mapHeight = Math.min(380, Math.max(230, windowHeight * 0.38));
   const visitCount = events.filter(event => event.kind === 'visit').length;
   const lastWalkingTrip = [...events]
@@ -227,6 +309,10 @@ export default function HomeScreen() {
         longitude: position.coords.longitude,
       });
       setMapFocus({
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+      });
+      void refreshWeather({
         latitude: position.coords.latitude,
         longitude: position.coords.longitude,
       });
