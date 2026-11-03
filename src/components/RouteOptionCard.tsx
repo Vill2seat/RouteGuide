@@ -4,6 +4,7 @@ import type { RouteCandidate } from '@services/routeService';
 type RouteOptionCardProps = {
   candidate: RouteCandidate;
   fastestDuration: number;
+  profileLabel: string;
   selected: boolean;
   onSelect: () => void;
   onOpen: () => void;
@@ -12,6 +13,7 @@ type RouteOptionCardProps = {
 export default function RouteOptionCard({
   candidate,
   fastestDuration,
+  profileLabel,
   selected,
   onSelect,
   onOpen,
@@ -40,6 +42,7 @@ export default function RouteOptionCard({
           <Text style={styles.duration}>{Math.round(candidate.durationMinutes)} мин</Text>
           <Text style={styles.distance}>{candidate.distanceKm.toFixed(1)} км</Text>
         </View>
+        <Text style={styles.profile}>{profileLabel}</Text>
         <View style={styles.conditionRow}>
           <Text style={styles.condition}>Шум: нет данных</Text>
           <Text style={styles.condition}>PM₂.₅: нет данных</Text>
@@ -88,6 +91,7 @@ const styles = StyleSheet.create({
     fontVariant: ['tabular-nums'],
   },
   distance: { color: '#78857D', fontSize: 14 },
+  profile: { color: '#68766D', fontSize: 12, marginTop: 6 },
   conditionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, marginTop: 8 },
   condition: { color: '#68766D', fontSize: 11 },
   detailsButton: {

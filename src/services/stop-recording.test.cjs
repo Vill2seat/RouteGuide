@@ -5,46 +5,65 @@ const path = require('node:path');
 const ts = require('typescript');
 const vm = require('node:vm');
 
-let foregroundSubscriptionRemoveCalled = 0;
-let foregroundSubscriptionRemoveThrows = false;
-let backgroundTaskStarted = false;
-let backgroundStopCount = 0;
-let stopLocationUpdatesThrows = false;
-let finishRouteThrows = false;
-let setAutomaticRecordingThrows = false;
-
-const locationMock = {
-  Accuracy: { Balanced: 3 },
-  getForegroundPermissionsAsync: async () => ({ status: 'granted' }),
-  getBackgroundPermissionsAsync: async () => ({ status: 'denied' }),
-  watchPositionAsync: async (_options, callback) => {
-    callback({ timestamp: Date.now(), coords: { latitude: 55.7558, longitude: 37.6173, accuracy: 10 } });
-    return { remove: () => { foregroundSubscriptionRemoveCalled += 1; if (foregroundSubscriptionRemoveThrows) throw new Error('remove failed'); } };
-  },
-  hasStartedLocationUpdatesAsync: async () => backgroundTaskStarted,
-  startLocationUpdatesAsync: async () => { backgroundTaskStarted = true; },
-  stopLocationUpdatesAsync: async () => {
-    backgroundTaskStarted = false;
-    backgroundStopCount += 1;
-    if (stopLocationUpdatesThrows) throw new Error('stop failed');
-  },
-};
-const taskManagerMock = {
-  isTaskDefined: () => true,
-  defineTask: () => {},
-};
-const databaseMock = {
-  appendLocations: async locations => {},
-  finishRoute: async () => { if (finishRouteThrows) throw new Error('finishRoute failed'); },
-  setAutomaticRecordingEnabled: async () => { if (setAutomaticRecordingThrows) throw new Error('setAuto failed'); },
-  getActiveRouteId: async () => null,
-  startRoute: async () => 'route-1',
-};
-const diagnosticsMock = { recordDiagnostic: async () => {} };
-
 function loadService() {
-  const serviceSource = fs.readFileSync(path.join(__dirname, 'locationService.ts'), 'utf8');
-  const javascript = ts.transpile(serviceSource, {
+  let foregroundSubscriptionRemoveCalled = 0;
+  let foregroundSubscriptionRemoveThrows = false;
+  let backgroundTaskStarted = false;
+  let backgroundStopCount = 0;
+  let stopLocationUpdatesThrows = false;
+  let finishRouteThrows = false;
+  let finishRouteCount = 0;
+  let setAutomaticRecordingThrows = false;
+  let automaticRecordingEnabled = true;
+  let activeRoute = true;
+
+  const locationMock = {
+    Accuracy: { Balanced: 3 },
+    ActivityType: { Fitness: 3 },
+    getForegroundPermissionsAsync: async () => ({ status: 'granted' }),
+    getBackgroundPermissionsAsync: async () => ({
+      status: backgroundTaskStarted ? 'granted' : backgroundPermission,
+    }),
+    watchPositionAsync: async () => ({
+      remove: () => {
+        foregroundSubscriptionRemoveCalled += 1;
+        if (foregroundSubscriptionRemoveThrows) throw new Error('remove failed');
+      },
+    }),
+    hasStartedLocationUpdatesAsync: async () => backgroundTaskStarted,
+    startLocationUpdatesAsync: async () => {
+      backgroundTaskStarted = true;
+    },
+    stopLocationUpdatesAsync: async () => {
+      backgroundStopCount += 1;
+      if (stopLocationUpdatesThrows) throw new Error('stop failed');
+      backgroundTaskStarted = false;
+    },
+  };
+  let backgroundPermission = 'denied';
+  const taskManagerMock = {
+    isTaskDefined: () => true,
+    defineTask: () => {},
+  };
+  const databaseMock = {
+    appendLocations: async () => {},
+    finishRoute: async () => {
+      finishRouteCount += 1;
+      if (finishRouteThrows) throw new Error('finishRoute failed');
+      activeRoute = false;
+    },
+    setAutomaticRecordingEnabled: async enabled => {
+      if (setAutomaticRecordingThrows) throw new Error('setAuto failed');
+      automaticRecordingEnabled = enabled;
+    },
+    getActiveRouteId: async () => (activeRoute ? 'route-1' : null),
+    startRoute: async () => {
+      activeRoute = true;
+      return 'route-1';
+    },
+  };
+  const source = fs.readFileSync(path.join(__dirname, 'locationService.ts'), 'utf8');
+  const javascript = ts.transpile(source, {
     module: ts.ModuleKind.CommonJS,
     target: ts.ScriptTarget.ES2020,
   });
@@ -56,84 +75,94 @@ function loadService() {
       if (specifier === 'expo-location') return locationMock;
       if (specifier === 'expo-task-manager') return taskManagerMock;
       if (specifier === './database') return { SQLiteDB: databaseMock };
-      if (specifier === './diagnostics') return diagnosticsMock;
+      if (specifier === './diagnostics') {
+        return { recordDiagnostic: async () => {} };
+      }
       return require(specifier);
     },
     console,
   });
-  return loadedModule.exports;
+
+  return {
+    service: loadedModule.exports,
+    setBackgroundPermission: value => { backgroundPermission = value; },
+    setForegroundSubscriptionRemoveThrows: value => { foregroundSubscriptionRemoveThrows = value; },
+    setStopLocationUpdatesThrows: value => { stopLocationUpdatesThrows = value; },
+    setFinishRouteThrows: value => { finishRouteThrows = value; },
+    setAutomaticRecordingThrows: value => { setAutomaticRecordingThrows = value; },
+    get foregroundSubscriptionRemoveCalled() { return foregroundSubscriptionRemoveCalled; },
+    get backgroundTaskStarted() { return backgroundTaskStarted; },
+    get backgroundStopCount() { return backgroundStopCount; },
+    get finishRouteCount() { return finishRouteCount; },
+    get automaticRecordingEnabled() { return automaticRecordingEnabled; },
+    get activeRoute() { return activeRoute; },
+  };
 }
 
-function reset() {
-  foregroundSubscriptionRemoveCalled = 0;
-  foregroundSubscriptionRemoveThrows = false;
-  backgroundTaskStarted = false;
-  backgroundStopCount = 0;
-  stopLocationUpdatesThrows = false;
-  finishRouteThrows = false;
-  setAutomaticRecordingThrows = false;
-}
+test('STOP-01: watcher removal failure is rejected and recording remains active', async () => {
+  const harness = loadService();
+  harness.setForegroundSubscriptionRemoveThrows(true);
+  await harness.service.startLocationTask();
 
-test('STOP-01: stopLocationTask не бросает исключение, если remove() падает', async () => {
-  reset();
-  foregroundSubscriptionRemoveThrows = true;
-  const service = loadService();
+  await assert.rejects(harness.service.stopLocationTask(), /remove failed/);
 
-  // startLocationTask чтобы создать подписку
-  await service.startLocationTask();
-
-  // stopLocationTask должен обработать ошибку remove()
-  // Но текущий код не имеет try/catch вокруг remove()
-  // Это может привести к вылету
-  let threw = false;
-  try {
-    await service.stopLocationTask();
-  } catch (e) {
-    threw = true;
-  }
-  // Если threw === true, это означает что ошибка не обработана и может вызвать вылет приложения
-  assert.equal(threw, false, 'stopLocationTask не должен выбрасывать исключение при ошибке remove()');
+  assert.equal(harness.foregroundSubscriptionRemoveCalled, 1);
+  assert.equal(await harness.service.getLocationRecordingMode(), 'foreground');
 });
 
-test('STOP-02: disableAutomaticRecording обрабатывает ошибку finishRoute', async () => {
-  reset();
-  finishRouteThrows = true;
-  const service = loadService();
+test('STOP-02: finishRoute failure propagates after location updates stop', async () => {
+  const harness = loadService();
+  await harness.service.startLocationTask();
+  harness.setFinishRouteThrows(true);
 
-  let threw = false;
-  try {
-    await service.disableAutomaticRecording();
-  } catch (e) {
-    threw = true;
-  }
-  assert.equal(threw, false, 'disableAutomaticRecording не должен выбрасывать исключение при ошибке finishRoute');
+  await assert.rejects(
+    harness.service.disableAutomaticRecording(),
+    /finishRoute failed/
+  );
+
+  assert.equal(harness.foregroundSubscriptionRemoveCalled, 1);
+  assert.equal(harness.finishRouteCount, 1);
+  assert.equal(harness.activeRoute, true);
+  assert.equal(harness.automaticRecordingEnabled, true);
+  assert.equal(await harness.service.getLocationRecordingMode(), null);
 });
 
-test('STOP-03: disableAutomaticRecording обрабатывает ошибку stopLocationTask', async () => {
-  reset();
-  stopLocationUpdatesThrows = true;
-  const service = loadService();
+test('STOP-03: background stop failure is exercised and does not report recording stopped', async () => {
+  const harness = loadService();
+  harness.setBackgroundPermission('granted');
+  await harness.service.startLocationTask();
+  harness.setStopLocationUpdatesThrows(true);
 
-  await service.startLocationTask();
-  let threw = false;
-  try {
-    await service.disableAutomaticRecording();
-  } catch (e) {
-    threw = true;
-  }
-  assert.equal(threw, false, 'disableAutomaticRecording не должен выбрасывать исключение при ошибке stopLocationTask');
+  await assert.rejects(
+    harness.service.disableAutomaticRecording(),
+    /stop failed/
+  );
+  assert.equal(harness.backgroundStopCount, 1);
+  assert.equal(harness.backgroundTaskStarted, true);
+  assert.equal(harness.finishRouteCount, 0);
+  assert.equal(harness.automaticRecordingEnabled, true);
+
+  harness.setStopLocationUpdatesThrows(false);
+  await harness.service.disableAutomaticRecording();
+  assert.equal(harness.backgroundStopCount, 2);
+  assert.equal(harness.backgroundTaskStarted, false);
+  assert.equal(harness.finishRouteCount, 1);
+  assert.equal(harness.automaticRecordingEnabled, false);
 });
 
-test('STOP-04: disableAutomaticRecording обрабатывает ошибку setAutomaticRecordingEnabled', async () => {
-  reset();
-  setAutomaticRecordingThrows = true;
-  const service = loadService();
+test('STOP-04: preference write failure propagates after route is stopped and finished', async () => {
+  const harness = loadService();
+  await harness.service.startLocationTask();
+  harness.setAutomaticRecordingThrows(true);
 
-  let threw = false;
-  try {
-    await service.disableAutomaticRecording();
-  } catch (e) {
-    threw = true;
-  }
-  assert.equal(threw, false, 'disableAutomaticRecording не должен выбрасывать исключение при ошибке setAutomaticRecordingEnabled');
+  await assert.rejects(
+    harness.service.disableAutomaticRecording(),
+    /setAuto failed/
+  );
+
+  assert.equal(harness.foregroundSubscriptionRemoveCalled, 1);
+  assert.equal(harness.finishRouteCount, 1);
+  assert.equal(harness.activeRoute, false);
+  assert.equal(harness.automaticRecordingEnabled, true);
+  assert.equal(await harness.service.getLocationRecordingMode(), null);
 });

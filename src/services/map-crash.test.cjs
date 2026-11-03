@@ -1,47 +1,55 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const ts = require('typescript');
+const vm = require('node:vm');
 
-// === Тест 1: assertCoordinate от routeService должен отсеивать невалидные координаты ===
-
-function assertCoordinate(point) {
-  if (
-    !Number.isFinite(point.latitude) ||
-    !Number.isFinite(point.longitude) ||
-    point.latitude < -90 ||
-    point.latitude > 90 ||
-    point.longitude < -180 ||
-    point.longitude > 180
-  ) {
-    throw new Error('Проверьте координаты начала и конца маршрута.');
-  }
+function loadAssertCoordinate() {
+  const source = fs.readFileSync(path.join(__dirname, 'routeService.ts'), 'utf8');
+  const javascript = ts.transpile(source, {
+    module: ts.ModuleKind.CommonJS,
+    target: ts.ScriptTarget.ES2020,
+  });
+  const loadedModule = { exports: {} };
+  vm.runInNewContext(javascript, {
+    module: loadedModule,
+    exports: loadedModule.exports,
+    require: specifier => {
+      if (specifier === 'expo-constants') return { default: { expoConfig: null } };
+      if (specifier === 'expo-crypto') return { randomUUID: () => 'route-id' };
+      if (specifier === './diagnostics') return { recordDiagnostic: async () => {} };
+      return require(specifier);
+    },
+  });
+  return loadedModule.exports.assertCoordinate;
 }
 
-test('MAP-CRASH-01: NaN latitude вызывает ошибку (не должно попасть в MapLibre)', () => {
+const assertCoordinate = loadAssertCoordinate();
+
+test('rejects NaN latitude before route geometry reaches the map', () => {
   assert.throws(() => assertCoordinate({ latitude: NaN, longitude: 0 }), /Проверьте координаты/);
 });
 
-test('MAP-CRASH-02: Infinity longitude вызывает ошибку', () => {
+test('rejects infinite longitude before route geometry reaches the map', () => {
   assert.throws(() => assertCoordinate({ latitude: 0, longitude: Infinity }), /Проверьте координаты/);
 });
 
-test('MAP-CRASH-03: latitude > 90 вызывает ошибку', () => {
+test('rejects latitude outside the geographic range', () => {
   assert.throws(() => assertCoordinate({ latitude: 91, longitude: 0 }), /Проверьте координаты/);
 });
 
-test('MAP-CRASH-04: longitude < -180 вызывает ошибку', () => {
+test('rejects longitude outside the geographic range', () => {
   assert.throws(() => assertCoordinate({ latitude: 0, longitude: -181 }), /Проверьте координаты/);
 });
 
-test('MAP-CRASH-05: валидные координаты проходят валидацию', () => {
+test('accepts valid coordinates and geographic boundary values', () => {
   assert.doesNotThrow(() => assertCoordinate({ latitude: 55.7558, longitude: 37.6173 }));
   assert.doesNotThrow(() => assertCoordinate({ latitude: -90, longitude: -180 }));
   assert.doesNotThrow(() => assertCoordinate({ latitude: 90, longitude: 180 }));
 });
 
-test('MAP-CRASH-06: null coordinates не проходят Number.isFinite', () => {
+test('rejects null and undefined coordinate values', () => {
   assert.throws(() => assertCoordinate({ latitude: null, longitude: 0 }), /Проверьте координаты/);
-});
-
-test('MAP-CRASH-07: undefined latitude не проходит Number.isFinite', () => {
   assert.throws(() => assertCoordinate({ latitude: undefined, longitude: 0 }), /Проверьте координаты/);
 });

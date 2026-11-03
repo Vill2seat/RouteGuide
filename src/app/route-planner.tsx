@@ -17,14 +17,18 @@ import RouteMap from '@components/RouteMap';
 import BottomNav from '@components/BottomNav';
 import RouteOptionCard from '@components/RouteOptionCard';
 import { SQLiteDB } from '@services/database';
+import BicycleIcon from '@assets/icons/bicycle.svg';
 import WalkIcon from '@assets/icons/walk.svg';
 import {
   assertCoordinate,
   getCurrentRouteCandidates,
   getRouteRecommendations,
+  getRouteProfileLabel,
+  isRouteProfile,
   parseRouteCandidate,
   type Coordinate,
   type RouteCandidate,
+  type RouteProfile,
 } from '@services/routeService';
 import { recommendRouteIndex } from '@services/routeRecommendation';
 import { getCityConditions, type CityConditions } from '@services/cityConditions';
@@ -41,6 +45,7 @@ export default function RoutePlannerScreen() {
     destinationLat?: string | string[];
     destinationLon?: string | string[];
     context?: string | string[];
+    profile?: string | string[];
   }>();
   const requestId = useRef(0);
   const firstParam = (value: string | string[] | undefined) =>
@@ -50,6 +55,7 @@ export default function RoutePlannerScreen() {
   const destinationLat = firstParam(params.destinationLat);
   const destinationLon = firstParam(params.destinationLon);
   const context = firstParam(params.context);
+  const requestedProfile = firstParam(params.profile);
   const historyStart =
     originLat !== undefined &&
     originLon !== undefined &&
@@ -64,6 +70,9 @@ export default function RoutePlannerScreen() {
     historyStart ? 'Конец прогулки' : ''
   );
   const [useCoordinateEndpoints, setUseCoordinateEndpoints] = useState(historyStart);
+  const [profile, setProfile] = useState<RouteProfile>(
+    isRouteProfile(requestedProfile) ? requestedProfile : 'pedestrian'
+  );
   const [locationDisclosureAccepted, setLocationDisclosureAccepted] = useState(false);
   const [loading, setLoading] = useState(false);
   const [conditionsLoading, setConditionsLoading] = useState(false);
@@ -133,6 +142,18 @@ export default function RoutePlannerScreen() {
   function selectRoute(id: string | null) {
     setSelectedId(id);
     setSelectedRouteId(id);
+  }
+
+  function selectProfile(nextProfile: RouteProfile) {
+    if (profile === nextProfile) return;
+    requestId.current += 1;
+    setProfile(nextProfile);
+    setLoading(false);
+    setConditionsLoading(false);
+    setCityConditions(null);
+    setCandidates([]);
+    setRecommendedId(null);
+    selectRoute(null);
   }
 
   async function resolveAddress(value: string, useCurrentLocation: boolean): Promise<Coordinate> {
@@ -213,7 +234,8 @@ export default function RoutePlannerScreen() {
       // Валидируем координаты перед запросом к сервису маршрутов — невалидные координаты вызывают вылет
       assertCoordinate(start);
       assertCoordinate(end);
-      const results = await getRouteRecommendations(start, end);
+      if (currentRequestId !== requestId.current) return;
+      const results = await getRouteRecommendations(start, end, profile);
       if (currentRequestId !== requestId.current) return;
       setCandidates(results);
       const recommended = results[recommendRouteIndex(results)] ?? null;
@@ -263,20 +285,50 @@ export default function RoutePlannerScreen() {
             <Text style={styles.back}>‹</Text>
           </TouchableOpacity>
           <View style={styles.heading}>
-            <Text style={styles.title}>Как приятнее дойти</Text>
+            <Text style={styles.title}>Построить маршрут</Text>
             <Text style={styles.headingSubtitle}>
               {useHistoryEndpoints
                 ? 'Участок из вашей истории'
                 : context === 'recalculated'
                   ? 'Новый маршрут от вашего места'
-                  : 'Пешком · выберите точки'}
+                  : `${getRouteProfileLabel(profile)} · выберите точки`}
             </Text>
           </View>
-          <WalkIcon width={22} height={22} color="#23644F" />
+          {profile === 'bicycle'
+            ? <BicycleIcon width={24} height={24} color="#23644F" />
+            : <WalkIcon width={22} height={22} color="#23644F" />}
         </View>
         <Text style={styles.subtitle}>
-          Реальные варианты пешеходных маршрутов. Данные о шуме и качестве воздуха вдоль улиц пока недоступны.
+          Выберите профиль и точки маршрута. Данные о шуме и качестве воздуха вдоль улиц пока недоступны.
         </Text>
+
+        <Text style={styles.label}>Профиль маршрута</Text>
+        <View style={styles.profilePicker} accessibilityLabel="Профиль маршрута">
+          <TouchableOpacity
+            accessibilityRole="radio"
+            accessibilityState={{ checked: profile === 'pedestrian' }}
+            onPress={() => selectProfile('pedestrian')}
+            style={[
+              styles.profileOption,
+              profile === 'pedestrian' && styles.profileOptionSelected,
+            ]}
+          >
+            <WalkIcon width={20} height={20} color="#23644F" />
+            <Text style={styles.profileOptionText}>Пешком</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            accessibilityRole="radio"
+            accessibilityState={{ checked: profile === 'bicycle' }}
+            onPress={() => selectProfile('bicycle')}
+            style={[
+              styles.profileOption,
+              profile === 'bicycle' && styles.profileOptionSelected,
+            ]}
+          >
+            <BicycleIcon width={22} height={22} color="#23644F" />
+            <Text style={styles.profileOptionText}>Велосипед</Text>
+          </TouchableOpacity>
+        </View>
 
         <Text style={styles.label}>Откуда</Text>
         <TextInput
@@ -407,6 +459,7 @@ export default function RoutePlannerScreen() {
             key={candidate.id}
             candidate={candidate}
             fastestDuration={fastestDuration}
+            profileLabel={getRouteProfileLabel(candidate.profile)}
             selected={selectedId === candidate.id}
             onSelect={() => selectRoute(candidate.id)}
             onOpen={() => router.push(`/route/${candidate.id}`)}
@@ -420,6 +473,7 @@ export default function RoutePlannerScreen() {
                 key={`saved-${candidate.id}`}
                 candidate={candidate}
                 fastestDuration={candidate.durationMinutes}
+                profileLabel={getRouteProfileLabel(candidate.profile)}
                 selected={false}
                 onSelect={() => router.push(`/route/${candidate.id}`)}
                 onOpen={() => router.push(`/route/${candidate.id}`)}
@@ -458,6 +512,28 @@ const styles = StyleSheet.create({
   headingSubtitle: { color: '#7A877F', fontSize: 12, marginTop: 2 },
   subtitle: { color: '#68766D', fontSize: 13, lineHeight: 19, marginTop: 9, marginBottom: 15 },
   label: { color: '#34433A', fontSize: 13, fontWeight: '600', marginBottom: 6 },
+  profilePicker: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 14,
+  },
+  profileOption: {
+    flex: 1,
+    minHeight: 48,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    borderWidth: 1,
+    borderColor: '#D5DED7',
+    borderRadius: 12,
+    backgroundColor: '#FFFFFF',
+  },
+  profileOptionSelected: {
+    borderColor: '#23644F',
+    backgroundColor: '#F0F6F1',
+  },
+  profileOptionText: { color: '#25342B', fontSize: 13, fontWeight: '600' },
   input: {
     minHeight: 48,
     borderWidth: 1,

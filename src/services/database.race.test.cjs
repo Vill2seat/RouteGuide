@@ -5,39 +5,46 @@ const path = require('node:path');
 const ts = require('typescript');
 const vm = require('node:vm');
 
-let initResolve;
-let initCallCount = 0;
-let dbInstance;
+function deferred() {
+  let resolve;
+  const promise = new Promise(resolvePromise => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
 
-const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-
-const sqliteMock = {
-  openDatabaseAsync: async name => {
-    initCallCount += 1;
-    // Имитируем задержку инициализации нативной БД
-    await new Promise(resolve => { initResolve = resolve; });
-    return {
-      execAsync: async () => {},
-      getFirstAsync: async () => null,
-      getAllAsync: async () => [],
-      runAsync: async () => ({ changes: 0 }),
-      withTransactionAsync: async cb => cb(),
-      closeAsync: async () => {},
-      databasePath: `/data/user/0/com.routeguide.app/databases/${name}`,
-    };
-  },
-};
-const cryptoMock = { randomUUID: () => 'fixed-uuid-1234' };
-const transportClassifierMock = { classifyTransport: () => null };
-const dayTimelineMock = {
-  getLocalDateKey: date => date.toISOString().slice(0, 10),
-  localDayBounds: date => {
-    const start = new Date(date.toISOString().slice(0, 10));
-    return { start, end: new Date(start.getTime() + 86_400_000) };
-  },
-};
-
-function loadDatabase() {
+function loadDatabase(options = {}) {
+  const openStarted = deferred();
+  const openGate = deferred();
+  let encryptedOpenCount = 0;
+  const fakeDatabase = {
+    execAsync: async () => {},
+    getFirstAsync: async query => {
+      if (query.includes('PRAGMA cipher_version')) {
+        return { cipher_version: '4.9.0' };
+      }
+      return null;
+    },
+    getAllAsync: async () => [],
+    runAsync: async () => ({ changes: 0 }),
+    withTransactionAsync: async callback => callback(),
+    closeAsync: async () => {},
+    databasePath: '/data/user/0/com.routeguide.app/databases/route_guide.db',
+  };
+  const sqliteMock = {
+    openDatabaseAsync: async name => {
+      if (name === 'route_guide_encrypted.db') {
+        encryptedOpenCount += 1;
+        if (encryptedOpenCount === 1) {
+          openStarted.resolve();
+          await openGate.promise;
+        }
+      }
+      return fakeDatabase;
+    },
+    backupDatabaseAsync: async () => {},
+    deleteDatabaseAsync: async () => {},
+  };
   const source = fs.readFileSync(path.join(__dirname, 'database.ts'), 'utf8');
   const javascript = ts.transpile(source, {
     module: ts.ModuleKind.CommonJS,
@@ -49,63 +56,77 @@ function loadDatabase() {
     exports: loadedModule.exports,
     require: specifier => {
       if (specifier === 'expo-sqlite') return sqliteMock;
-      if (specifier === 'expo-crypto') return cryptoMock;
-      if (specifier === './transportClassifier') return transportClassifierMock;
-      if (specifier === './dayTimeline') return dayTimelineMock;
+      if (specifier === 'expo-crypto') {
+        return { randomUUID: () => 'fixed-uuid-1234' };
+      }
+      if (specifier === 'expo-secure-store') {
+        return {
+          getItemAsync: async () => 'a'.repeat(64),
+          setItemAsync: async () => {},
+        };
+      }
+      if (specifier === './transportClassifier') {
+        return { classifyTransport: () => null };
+      }
+      if (specifier === './dayTimeline') {
+        return {
+          getLocalDateKey: date => date.toISOString().slice(0, 10),
+          localDayBounds: date => {
+            const start = new Date(date.toISOString().slice(0, 10));
+            return { start, end: new Date(start.getTime() + 86_400_000) };
+          },
+        };
+      }
       return require(specifier);
     },
     console,
   });
-  return loadedModule.exports;
+  return {
+    SQLiteDB: loadedModule.exports.SQLiteDB,
+    openStarted: openStarted.promise,
+    releaseOpen: openGate.resolve,
+    get encryptedOpenCount() {
+      return encryptedOpenCount;
+    },
+    ...options,
+  };
 }
 
-function resetState() {
-  initResolve = null;
-  initCallCount = 0;
-  dbInstance = null;
-}
+test('DB-RACE-01: parallel init calls share one in-flight database open', async () => {
+  const harness = loadDatabase();
+  const first = harness.SQLiteDB.init();
+  const second = harness.SQLiteDB.init();
 
-test('DB-RACE-01: два параллельных вызова init() не создают две инициализации БД', async () => {
-  resetState();
-  const { SQLiteDB } = loadDatabase();
-
-  const p1 = SQLiteDB.init();
-  const p2 = SQLiteDB.init();
-
-  if (initResolve) initResolve();
-  await p1;
-  await p2;
-
-  // openDatabaseAsync должен быть вызван 1 раз, а не 2
-  assert.equal(initCallCount, 1, `Ожидался 1 вызов openDatabaseAsync, получен ${initCallCount} (гонка init)`);
+  await harness.openStarted;
+  assert.equal(harness.encryptedOpenCount, 1);
+  harness.releaseOpen();
+  await Promise.all([first, second]);
+  assert.equal(harness.encryptedOpenCount, 1);
 });
 
-test('DB-RACE-02: init() после завершения первого не повторяет инициализацию', async () => {
-  resetState();
-  const { SQLiteDB } = loadDatabase();
+test('DB-RACE-02: init after completion reuses the initialized database', async () => {
+  const harness = loadDatabase();
+  const first = harness.SQLiteDB.init();
+  await harness.openStarted;
+  harness.releaseOpen();
+  await first;
 
-  await SQLiteDB.init();
-  if (initResolve) initResolve();
-  await delay(10);
-
-  await SQLiteDB.init();
-  if (initResolve) initResolve();
-  await delay(10);
-
-  assert.equal(initCallCount, 1, `Повторный init не должен инициализировать БД снова`);
+  await harness.SQLiteDB.init();
+  assert.equal(harness.encryptedOpenCount, 1);
 });
 
-test('DB-RACE-03: параллельные init() не оставляют db в неинициализированном состоянии', async () => {
-  resetState();
-  const { SQLiteDB } = loadDatabase();
+test('DB-RACE-03: parallel init callers can use the initialized database', async () => {
+  const harness = loadDatabase();
+  const first = harness.SQLiteDB.init();
+  const second = harness.SQLiteDB.init();
 
-  const p1 = SQLiteDB.init();
-  const p2 = SQLiteDB.init();
+  await harness.openStarted;
+  harness.releaseOpen();
+  await Promise.all([first, second]);
 
-  if (initResolve) initResolve();
-  await p1;
-  await p2;
-
-  // Оба промиса должны разрешиться без ошибок
-  assert.ok(true, 'Оба init() завершились без исключения');
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(await harness.SQLiteDB.getRoutes())),
+    []
+  );
+  assert.equal(harness.encryptedOpenCount, 1);
 });

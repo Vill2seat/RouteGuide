@@ -1,0 +1,12 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^git status --short && printf '\\\\nTop-level entries:\\\\n' && ls -la$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^printf 'Node/npm: '; node --version && npm --version && printf '\\\\nInstalled dependencies: ' && if test -d src/node_modules; then echo yes; else echo no; fi && printf '\\\\nTracked CI/workflow files:\\\\n' && git ls-files '\\.github/workflows/\\*' '\\.github/instructions/\\*' '\\.github/copilot-instructions\\.md'$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

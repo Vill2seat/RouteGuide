@@ -7,12 +7,20 @@ export type Coordinate = {
   longitude: number;
 };
 
+export type RouteProfile = 'pedestrian' | 'bicycle';
+
 export type RouteCandidate = {
   id: string;
+  profile: RouteProfile;
   coordinates: Coordinate[];
   distanceKm: number;
   durationMinutes: number;
 };
+
+export type RouteCandidateComparison =
+  | { status: 'fastest' }
+  | { status: 'alternative'; minutesSlower: number }
+  | { status: 'unknown' };
 
 type ValhallaLeg = {
   shape?: string;
@@ -31,32 +39,61 @@ type ValhallaResponse = {
   status_message?: string;
 };
 
+export function isRouteProfile(value: unknown): value is RouteProfile {
+  return value === 'pedestrian' || value === 'bicycle';
+}
+
+export function getRouteProfileLabel(profile: RouteProfile): string {
+  return profile === 'bicycle' ? 'На велосипеде' : 'Пешком';
+}
+
 const routingEndpoint =
   Constants.expoConfig?.extra?.routingEndpoint ??
   'https://valhalla1.openstreetmap.de/route';
 
-// Несколько запросов в одно время не портят состояние друг друга.
-// Храним данные текущего запроса внутри одной переменной; при повторном
-// запросе сбрасываем предыдущие результаты. Это устраняет гонки между
-// параллельными вызовами getRouteRecommendations.
-let currentRouteCandidates: RouteCandidate[] | null = null;
+type RouteCandidateGroup = {
+  requestId: number;
+  candidates: RouteCandidate[];
+};
+
+let currentRouteCandidateGroup: RouteCandidateGroup | null = null;
 let currentRequestId = 0;
 
+function getCurrentCandidates(): RouteCandidate[] {
+  if (currentRouteCandidateGroup?.requestId !== currentRequestId) return [];
+  return currentRouteCandidateGroup.candidates;
+}
+
 export function getRouteCandidateById(id: string): RouteCandidate | null {
-  if (currentRouteCandidates === null) return null;
-  return currentRouteCandidates.find(candidate => candidate.id === id) ?? null;
+  return getCurrentCandidates().find(candidate => candidate.id === id) ?? null;
 }
 
 export function getRouteCandidateGroupById(id: string): RouteCandidate[] {
-  if (currentRouteCandidates === null) return [];
-  // Группа — это набор всех альтернатив текущего запроса, на который
-  // рассчитывалась конкретная точка маршрута. Возвращаем только кандидаты,
-  // присутствующие в ответе текущего запроса.
-  return currentRouteCandidates.filter(candidate => candidate.id === id);
+  const candidates = getCurrentCandidates();
+  return candidates.some(candidate => candidate.id === id) ? candidates : [];
+}
+
+export function getRouteCandidateComparison(
+  candidate: RouteCandidate
+): RouteCandidateComparison {
+  const group = getRouteCandidateGroupById(candidate.id);
+  const currentCandidate = group.find(item => item.id === candidate.id);
+  if (!currentCandidate || currentCandidate.durationMinutes !== candidate.durationMinutes) {
+    return { status: 'unknown' };
+  }
+
+  const fastestDuration = Math.min(...group.map(item => item.durationMinutes));
+  if (currentCandidate.durationMinutes === fastestDuration) {
+    return { status: 'fastest' };
+  }
+  return {
+    status: 'alternative',
+    minutesSlower: Math.max(0, Math.round(currentCandidate.durationMinutes - fastestDuration)),
+  };
 }
 
 export function getCurrentRouteCandidates(): RouteCandidate[] {
-  return currentRouteCandidates ?? [];
+  return getCurrentCandidates();
 }
 
 export function parseRouteCandidate(routeData: string, expectedId?: string): RouteCandidate {
@@ -65,9 +102,11 @@ export function parseRouteCandidate(routeData: string, expectedId?: string): Rou
     throw new Error('В сохранённом маршруте отсутствуют данные.');
   }
   const candidate = parsed as Partial<RouteCandidate>;
+  const profile = candidate.profile ?? 'pedestrian';
   if (
     typeof candidate.id !== 'string' ||
     (expectedId !== undefined && candidate.id !== expectedId) ||
+    !isRouteProfile(profile) ||
     !Array.isArray(candidate.coordinates) ||
     candidate.coordinates.length < 2 ||
     !candidate.coordinates.every(
@@ -90,7 +129,7 @@ export function parseRouteCandidate(routeData: string, expectedId?: string): Rou
   ) {
     throw new Error('Сохранённый маршрут повреждён или неполон.');
   }
-  return candidate as RouteCandidate;
+  return { ...candidate, profile } as RouteCandidate;
 }
 
 export function assertCoordinate(point: Coordinate): void {
@@ -153,7 +192,8 @@ async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Respon
 
 async function fetchRouteAlternatives(
   start: Coordinate,
-  end: Coordinate
+  end: Coordinate,
+  profile: RouteProfile
 ): Promise<RouteCandidate[]> {
   const response = await fetchWithTimeout(routingEndpoint, {
     method: 'POST',
@@ -163,7 +203,7 @@ async function fetchRouteAlternatives(
         { lat: start.latitude, lon: start.longitude },
         { lat: end.latitude, lon: end.longitude },
       ],
-      costing: 'pedestrian',
+      costing: profile,
       units: 'kilometers',
       alternates: 2,
     }),
@@ -199,6 +239,7 @@ async function fetchRouteAlternatives(
 
     return {
       id: randomUUID(),
+      profile,
       coordinates,
       distanceKm: summary.length,
       durationMinutes: summary.time / 60,
@@ -208,28 +249,27 @@ async function fetchRouteAlternatives(
 
 export async function getRouteRecommendations(
   start: Coordinate,
-  end: Coordinate
+  end: Coordinate,
+  profile: RouteProfile = 'pedestrian'
 ): Promise<RouteCandidate[]> {
   assertCoordinate(start);
   assertCoordinate(end);
+  if (!isRouteProfile(profile)) {
+    throw new Error('Выбран неподдерживаемый профиль маршрута.');
+  }
 
   currentRequestId += 1;
   const requestId = currentRequestId;
+  currentRouteCandidateGroup = null;
 
   try {
-    const candidates = await fetchRouteAlternatives(start, end);
-    currentRouteCandidates = candidates;
-    // Отображаем только текущий набор; старые карты не оставляем в памяти.
+    const candidates = await fetchRouteAlternatives(start, end, profile);
+    if (currentRequestId === requestId) {
+      currentRouteCandidateGroup = { requestId, candidates };
+    }
     return candidates;
   } catch (error) {
-    await recordDiagnostic('warning', 'Public walking-route provider request failed');
+    await recordDiagnostic('warning', 'Public route provider request failed');
     throw error;
-  } finally {
-    // Если по окончании запроса счётчик запросов не изменился, данные по-прежнему
-    // валидны. В случае параллельного/повторного запроса очищаем результат,
-    // чтобы не отдавать данные прошлого запроса.
-    if (currentRequestId !== requestId) {
-      currentRouteCandidates = null;
-    }
   }
 }

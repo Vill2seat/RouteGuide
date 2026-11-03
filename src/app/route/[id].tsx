@@ -21,7 +21,8 @@ import { recordDiagnostic } from '@services/diagnostics';
 import BottomNav from '@components/BottomNav';
 import {
   getRouteCandidateById,
-  getRouteCandidateGroupById,
+  getRouteCandidateComparison,
+  getRouteProfileLabel,
   parseRouteCandidate,
   type Coordinate,
   type RouteCandidate,
@@ -166,10 +167,7 @@ function PlannedRouteDetail({
 }) {
   const router = useRouter();
   const { height: windowHeight } = useWindowDimensions();
-  const cachedCandidates = getRouteCandidateGroupById(route.id);
-  const candidates = cachedCandidates.length ? cachedCandidates : [route];
-  const fastestDuration = Math.min(...candidates.map(candidate => candidate.durationMinutes));
-  const isFastest = route.durationMinutes === fastestDuration;
+  const comparison = getRouteCandidateComparison(route);
   const start = route.coordinates[0];
   const destination = route.coordinates[route.coordinates.length - 1];
   const [bookmarked, setBookmarked] = useState(false);
@@ -253,6 +251,7 @@ function PlannedRouteDetail({
                     destinationLat: String(destination.latitude),
                     destinationLon: String(destination.longitude),
                     context: 'recalculated',
+                    profile: route.profile,
                   },
                 }),
             },
@@ -290,9 +289,15 @@ function PlannedRouteDetail({
         </TouchableOpacity>
         <View style={styles.plannedHeading}>
           <Text style={styles.plannedTitle}>
-            {isFastest ? 'По самому быстрому пути' : 'Альтернативный маршрут'}
+            {comparison.status === 'fastest'
+              ? 'По самому быстрому пути'
+              : comparison.status === 'alternative'
+                ? 'Альтернативный маршрут'
+                : 'Маршрутный вариант'}
           </Text>
-          <Text style={styles.plannedSubtitle}>Пешком · маршрут из дорожной сети</Text>
+          <Text style={styles.plannedSubtitle}>
+            {getRouteProfileLabel(route.profile)} · маршрут из дорожной сети
+          </Text>
         </View>
         <TouchableOpacity
           accessibilityRole="button"
@@ -324,9 +329,11 @@ function PlannedRouteDetail({
           <Text style={styles.plannedDistance}>{route.distanceKm.toFixed(1)} км</Text>
         </View>
         <Text style={styles.comparisonHint}>
-          {isFastest
+          {comparison.status === 'fastest'
             ? 'Самый быстрый из найденных вариантов по расчётному времени.'
-            : `${Math.max(0, Math.round(route.durationMinutes - fastestDuration))} мин дольше самого быстрого варианта.`}
+            : comparison.status === 'alternative'
+              ? `${comparison.minutesSlower} мин дольше самого быстрого варианта.`
+              : 'Сравнение с другими вариантами недоступно.'}
         </Text>
 
         <Text style={styles.conditionsHeading}>Условия на маршруте</Text>
